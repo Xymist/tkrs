@@ -1,5 +1,5 @@
-use assert_cmd::Command;
 use assert_cmd::cargo::cargo_bin_cmd;
+use assert_cmd::Command;
 use assert_fs::TempDir;
 use predicates::prelude::*;
 use std::fs;
@@ -267,17 +267,84 @@ fn dep_cycle_reports_cycle() {
         let out = create.arg("create").arg("B").output().unwrap();
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     };
+    let c = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("C").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
 
     tk_cmd(&temp).arg("dep").arg(&a).arg(&b).assert().success();
+    tk_cmd(&temp).arg("dep").arg(&b).arg(&c).assert().success();
+    tk_cmd(&temp).arg("dep").arg(&c).arg(&a).assert().success();
 
-    tk_cmd(&temp).arg("dep").arg(&b).arg(&a).assert().success();
+    let mut canonical = vec![a.clone(), b.clone(), c.clone()];
+    let (min_idx, _) = canonical
+        .iter()
+        .enumerate()
+        .min_by(|(_, left), (_, right)| left.cmp(right))
+        .unwrap();
+    canonical.rotate_left(min_idx);
+    let first = canonical.first().unwrap().clone();
+    canonical.push(first);
+    let expected_line = canonical.join(" -> ");
 
     tk_cmd(&temp)
         .arg("dep")
         .arg("cycle")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Cycle 1"));
+        .stdout(predicate::str::contains("Dependency cycles:"))
+        .stdout(predicate::str::contains(&expected_line));
+}
+
+#[test]
+fn dep_cycle_include_closed_flag() {
+    let temp = TempDir::new().unwrap();
+
+    let closed_a = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("Closed A").output().unwrap();
+        let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        tk_cmd(&temp).arg("close").arg(&id).assert().success();
+        id
+    };
+    let closed_b = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("Closed B").output().unwrap();
+        let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        tk_cmd(&temp).arg("close").arg(&id).assert().success();
+        id
+    };
+
+    tk_cmd(&temp)
+        .arg("dep")
+        .arg(&closed_a)
+        .arg(&closed_b)
+        .assert()
+        .success();
+    tk_cmd(&temp)
+        .arg("dep")
+        .arg(&closed_b)
+        .arg(&closed_a)
+        .assert()
+        .success();
+
+    tk_cmd(&temp)
+        .arg("dep")
+        .arg("cycle")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No dependency cycles found"));
+
+    tk_cmd(&temp)
+        .arg("dep")
+        .arg("cycle")
+        .arg("--include-closed")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Dependency cycles:"))
+        .stdout(predicate::str::contains(&closed_a))
+        .stdout(predicate::str::contains(&closed_b));
 }
 
 #[test]

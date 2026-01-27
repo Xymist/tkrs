@@ -164,16 +164,22 @@ struct DepArgs {
     dep_id: Option<String>,
 }
 
+#[derive(Args, Debug)]
+struct DepCycleArgs {
+    #[arg(long = "include-closed", default_value_t = false, help = "Include closed tickets when detecting cycles")]
+    include_closed: bool,
+}
+
 #[derive(Subcommand, Debug)]
 enum DepAction {
     Tree(DepTreeArgs),
-    Cycle,
+    Cycle(DepCycleArgs),
 }
 
 fn cmd_dep(args: DepArgs) -> Result<(), String> {
     match args.action {
         Some(DepAction::Tree(tree_args)) => dep_tree(tree_args),
-        Some(DepAction::Cycle) => dep_cycle(),
+        Some(DepAction::Cycle(cycle_args)) => dep_cycle(cycle_args),
         None => dep_add(args),
     }
 }
@@ -311,8 +317,32 @@ fn resolve_partial_id(tickets: &[Ticket], needle: &str) -> Result<String, String
     }
 }
 
-fn dep_tree(args: DepTreeArgs) -> Result<(), String> {
+fn read_ticket_graph(include_closed: bool) -> Result<(Vec<Ticket>, HashMap<String, Vec<String>>), String> {
     let tickets = read_all_tickets().map_err(|e| e.to_string())?;
+    if tickets.is_empty() {
+        return Ok((tickets, HashMap::new()));
+    }
+
+    let filtered: Vec<_> = if include_closed {
+        tickets.clone()
+    } else {
+        tickets
+            .iter()
+            .cloned()
+            .filter(|t| t.status != "closed")
+            .collect()
+    };
+
+    let mut graph: HashMap<String, Vec<String>> = HashMap::new();
+    for t in &filtered {
+        graph.insert(t.id.clone(), t.deps.clone());
+    }
+
+    Ok((filtered, graph))
+}
+
+fn dep_tree(args: DepTreeArgs) -> Result<(), String> {
+    let (tickets, _) = read_ticket_graph(true)?;
     if tickets.is_empty() {
         return Err("Error: ticket not found".to_string());
     }
@@ -368,64 +398,83 @@ fn dep_tree(args: DepTreeArgs) -> Result<(), String> {
     Ok(())
 }
 
-fn dep_cycle() -> Result<(), String> {
-    let tickets = read_all_tickets().map_err(|e| e.to_string())?;
-    if tickets.is_empty() {
+fn canonicalize_cycle(cycle: &[String]) -> Vec<String> {
+    let mut core: Vec<String> = if cycle.len() > 1 && cycle.first() == cycle.last() {
+        cycle[..cycle.len() - 1].to_vec()
+    } else {
+        cycle.to_vec()
+    };
+
+    if core.is_empty() {
+        return cycle.to_vec();
+    }
+
+    let (min_idx, _) = core
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| a.cmp(b))
+        .unwrap();
+
+    core.rotate_left(min_idx);
+    let first = core.first().cloned().unwrap();
+    core.push(first);
+    core
+}
+
+fn dep_cycle(args: DepCycleArgs) -> Result<(), String> {
+    let (_, graph) = read_ticket_graph(args.include_closed)?;
+    if graph.is_empty() {
         println!("No dependency cycles found");
         return Ok(());
     }
 
-    let open_only: Vec<_> = tickets
-        .into_iter()
-        .filter(|t| t.status != "closed")
-        .collect();
-
-    let mut graph: HashMap<String, Vec<String>> = HashMap::new();
-    for t in &open_only {
-        graph.insert(t.id.clone(), t.deps.clone());
-    }
-
     let mut state: HashMap<String, u8> = HashMap::new();
     let mut cycles: Vec<Vec<String>> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    fn dfs(
+        node: &str,
+        graph: &HashMap<String, Vec<String>>,
+        state: &mut HashMap<String, u8>,
+        stack: &mut Vec<String>,
+        cycles: &mut Vec<Vec<String>>,
+        seen: &mut HashSet<String>,
+    ) {
+        state.insert(node.to_string(), 1);
+        stack.push(node.to_string());
+
+        if let Some(neighbors) = graph.get(node) {
+            for neigh in neighbors {
+                if !graph.contains_key(neigh) {
+                    continue;
+                }
+                match state.get(neigh).copied().unwrap_or(0) {
+                    0 => dfs(neigh, graph, state, stack, cycles, seen),
+                    1 => {
+                        if let Some(pos) = stack.iter().position(|p| p == neigh) {
+                            let mut cycle = stack[pos..].to_vec();
+                            cycle.push(neigh.clone());
+                            let canonical = canonicalize_cycle(&cycle);
+                            let key = canonical[..canonical.len() - 1].join("->");
+                            if seen.insert(key) {
+                                cycles.push(canonical);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        state.insert(node.to_string(), 2);
+        stack.pop();
+    }
 
     for node in graph.keys() {
         if state.get(node) == Some(&2) {
             continue;
         }
-        let mut stack: Vec<(String, usize)> = Vec::new();
-        let mut path: Vec<String> = Vec::new();
-        stack.push((node.clone(), 0));
-
-        while let Some((n, idx)) = stack.pop() {
-            match state.get(&n).copied().unwrap_or(0) {
-                0 => {
-                    state.insert(n.clone(), 1); // visiting
-                    stack.push((n.clone(), 0xff));
-                    path.push(n.clone());
-                    if let Some(neighbors) = graph.get(&n) {
-                        for neigh in neighbors.iter().rev() {
-                            stack.push((neigh.clone(), path.len()));
-                        }
-                    }
-                }
-                1 => {
-                    // finishing node if idx == 0xff marker
-                    state.insert(n.clone(), 2);
-                    path.pop();
-                }
-                _ => {
-                    // already done
-                }
-            }
-
-            if idx != 0xff
-                && let Some(pos) = path.iter().position(|p| p == &n)
-            {
-                let mut cycle = path[pos..].to_vec();
-                cycle.push(n.clone());
-                cycles.push(cycle);
-            }
-        }
+        dfs(node, &graph, &mut state, &mut Vec::new(), &mut cycles, &mut seen);
     }
 
     if cycles.is_empty() {
@@ -433,8 +482,11 @@ fn dep_cycle() -> Result<(), String> {
         return Ok(());
     }
 
-    for (i, cycle) in cycles.iter().enumerate() {
-        println!("Cycle {}: {}", i + 1, cycle.join(" -> "));
+    cycles.sort_by(|a, b| a[..a.len() - 1].cmp(&b[..b.len() - 1]));
+
+    println!("Dependency cycles:");
+    for cycle in cycles {
+        println!("{}", cycle.join(" -> "));
     }
 
     Ok(())
