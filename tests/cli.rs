@@ -998,3 +998,63 @@ fn unlink_removes_links_bidirectionally() {
     assert!(one_contents.contains("links: []"));
     assert!(two_contents.contains("links: []"));
 }
+
+#[test]
+fn unlink_warns_when_missing_and_is_idempotent() {
+    let temp = TempDir::new().unwrap();
+
+    let one = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("One").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    let two = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("Two").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    // Link first to set up symmetry
+    tk_cmd(&temp)
+        .arg("link")
+        .arg(&one)
+        .arg(&two)
+        .assert()
+        .success();
+
+    let one_path = temp.path().join(".tickets").join(format!("{one}.md"));
+    let two_path = temp.path().join(".tickets").join(format!("{two}.md"));
+
+    // First unlink succeeds and writes once per side
+    tk_cmd(&temp)
+        .arg("unlink")
+        .arg(&one)
+        .arg(&two)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Unlinked"));
+
+    let one_after = fs::read_to_string(&one_path).unwrap();
+    let two_after = fs::read_to_string(&two_path).unwrap();
+    assert!(one_after.contains("links: []"));
+    assert!(two_after.contains("links: []"));
+
+    // Second unlink is idempotent, warns when requested, and does not rewrite contents
+    let before_again_one = fs::read_to_string(&one_path).unwrap();
+    let before_again_two = fs::read_to_string(&two_path).unwrap();
+
+    tk_cmd(&temp)
+        .arg("unlink")
+        .arg(&one)
+        .arg(&two)
+        .arg("--warn-missing")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Warning: link"));
+
+    let after_again_one = fs::read_to_string(&one_path).unwrap();
+    let after_again_two = fs::read_to_string(&two_path).unwrap();
+    assert_eq!(before_again_one, after_again_one);
+    assert_eq!(before_again_two, after_again_two);
+}

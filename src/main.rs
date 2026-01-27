@@ -518,29 +518,68 @@ fn cmd_undep(args: DepEdgeArgs) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_link(args: LinkArgs) -> Result<(), String> {
-    let mut primary = load_ticket_by_id(&args.id)?;
-    let mut targets = Vec::new();
-    for t in &args.targets {
-        targets.push(load_ticket_by_id(t)?);
-    }
+#[derive(Clone, Copy)]
+enum LinkOp {
+    Add,
+    Remove,
+}
 
-    // Update primary links
-    for t in &targets {
-        if !primary.links.contains(&t.id) {
-            primary.links.push(t.id.clone());
+struct LinkUpdate {
+    changed: bool,
+    missing: Vec<String>,
+}
+
+fn update_link_set(ticket: &mut Ticket, ids: &[String], op: LinkOp) -> LinkUpdate {
+    let mut set: HashSet<String> = ticket.links.iter().cloned().collect();
+    let mut missing = Vec::new();
+    let mut changed = false;
+
+    match op {
+        LinkOp::Add => {
+            for id in ids {
+                if set.insert(id.clone()) {
+                    changed = true;
+                }
+            }
+        }
+        LinkOp::Remove => {
+            for id in ids {
+                if set.remove(id) {
+                    changed = true;
+                } else {
+                    missing.push(id.clone());
+                }
+            }
         }
     }
-    primary.links.sort();
-    primary.links.dedup();
-    write_ticket_links(&primary.path, &primary.links)?;
 
-    // Update target links symmetrically
-    for mut t in targets {
-        if !t.links.contains(&primary.id) {
-            t.links.push(primary.id.clone());
-            t.links.sort();
-            t.links.dedup();
+    if changed {
+        let mut links: Vec<String> = set.into_iter().collect();
+        links.sort();
+        ticket.links = links;
+    }
+
+    LinkUpdate { changed, missing }
+}
+
+fn cmd_link(args: LinkArgs) -> Result<(), String> {
+    let mut primary = load_ticket_by_id(&args.id)?;
+    let mut targets: Vec<Ticket> = args
+        .targets
+        .iter()
+        .map(|t| load_ticket_by_id(t))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let target_ids: Vec<String> = targets.iter().map(|t| t.id.clone()).collect();
+
+    let primary_update = update_link_set(&mut primary, &target_ids, LinkOp::Add);
+    if primary_update.changed {
+        write_ticket_links(&primary.path, &primary.links)?;
+    }
+
+    for t in targets.iter_mut() {
+        let update = update_link_set(t, &[primary.id.clone()], LinkOp::Add);
+        if update.changed {
             write_ticket_links(&t.path, &t.links)?;
         }
     }
@@ -553,23 +592,26 @@ fn cmd_unlink(args: UnlinkArgs) -> Result<(), String> {
     let mut primary = load_ticket_by_id(&args.id)?;
     let mut target = load_ticket_by_id(&args.target_id)?;
 
-    let mut changed = false;
-    let len_before = primary.links.len();
-    primary.links.retain(|l| l != &target.id);
-    if primary.links.len() != len_before {
-        changed = true;
+    let mut missing: Vec<String> = Vec::new();
+
+    let primary_result = update_link_set(&mut primary, &[target.id.clone()], LinkOp::Remove);
+    if primary_result.changed {
         write_ticket_links(&primary.path, &primary.links)?;
     }
+    missing.extend(primary_result.missing);
 
-    let len_before_t = target.links.len();
-    target.links.retain(|l| l != &primary.id);
-    if target.links.len() != len_before_t {
-        changed = true;
+    let target_result = update_link_set(&mut target, &[primary.id.clone()], LinkOp::Remove);
+    if target_result.changed {
         write_ticket_links(&target.path, &target.links)?;
     }
+    missing.extend(target_result.missing);
 
-    if changed {
+    if primary_result.changed || target_result.changed {
         println!("Unlinked {} <-> {}", primary.id, target.id);
+    }
+
+    if args.warn_missing && !missing.is_empty() {
+        println!("Warning: link {} <-> {} not found", primary.id, target.id);
     }
     Ok(())
 }
@@ -1158,6 +1200,13 @@ struct LinkArgs {
 struct UnlinkArgs {
     id: String,
     target_id: String,
+
+    #[arg(
+        long = "warn-missing",
+        default_value_t = false,
+        help = "Print a warning instead of silent success when link is absent"
+    )]
+    warn_missing: bool,
 }
 
 #[derive(Args, Debug)]
