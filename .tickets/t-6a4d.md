@@ -8,6 +8,7 @@ type: chore
 priority: 2
 assignee: OpenCode
 tags: [optimize, cli]
+closed_at: 2026-01-27T19:03:40Z
 ---
 # Optimize closed command: portable recency
 

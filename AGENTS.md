@@ -20,7 +20,7 @@ Key functions:
 - Implement the changes suggested in the ticket
 - Add tests for the changes and run them with `cargo nextest run`
 - Document what was changed, appended to the ticket
-- Mark the ticket as closed
+- Mark the ticket as closed using `cargo run -- close <ticket_id>`
 - Use `jj` to commit with the message formatted as `<ticket-number>: <short-description>`
 
 ## Changelog

@@ -8,6 +8,7 @@ type: bug
 priority: 2
 assignee: OpenCode
 tags: [cli]
+closed_at: 2026-01-27T20:01:21Z
 ---
 # Title is not being correctly discovered
 

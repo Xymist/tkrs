@@ -8,6 +8,7 @@ type: chore
 priority: 2
 assignee: OpenCode
 tags: [optimize, cli]
+closed_at: 2026-01-27T18:52:47Z
 ---
 # Optimize create command: validation & templates
 
