@@ -2452,6 +2452,35 @@ fn generate_id() -> Result<String, io::Error> {
 }
 
 fn tickets_dir() -> PathBuf {
+    if let Ok(env_path) = std::env::var("TICKETS_DIR") {
+        let path = PathBuf::from(env_path);
+        if path.is_absolute() {
+            return path;
+        }
+
+        if let Ok(cwd) = std::env::current_dir() {
+            return cwd.join(path);
+        }
+
+        return path;
+    }
+
+    let mut dir = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(_) => return PathBuf::from(".tickets"),
+    };
+
+    loop {
+        let candidate = dir.join(".tickets");
+        if candidate.is_dir() {
+            return candidate;
+        }
+
+        if !dir.pop() {
+            break;
+        }
+    }
+
     PathBuf::from(".tickets")
 }
 

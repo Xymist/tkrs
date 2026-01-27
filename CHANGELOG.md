@@ -25,7 +25,7 @@
 
 ### Changed
 
-- Walk parent directories to find `.tickets/` directory, enabling commands from any subdirectory
+- Walk parent directories to find `.tickets/` directory (or `TICKETS_DIR`), enabling commands from any subdirectory
 
 ### Fixed
 

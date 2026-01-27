@@ -14,6 +14,7 @@ Always update the README.md usage content when adding/changing commands and flag
 - Run `cargo clippy` and `cargo fmt`; fix any suggestions
 - Document what was changed, appended to the ticket
 - Mark the ticket as closed using `cargo run -- close <ticket_id>`
+- Add the ticket to CHANGELOG.md in the `Unreleased` section
 - Run `jj commit -m "<ticket_number>: <ticket_title>"`
 
 ## Changelog

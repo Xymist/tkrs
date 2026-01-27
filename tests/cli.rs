@@ -105,6 +105,50 @@ fn create_writes_ticket_with_defaults() {
 }
 
 #[test]
+fn create_uses_parent_tickets_dir() {
+    let temp = TempDir::new().unwrap();
+    let tickets_root = temp.path().join(".tickets");
+    fs::create_dir_all(&tickets_root).unwrap();
+
+    let nested = temp.path().join("a/b/c");
+    fs::create_dir_all(&nested).unwrap();
+
+    let output = tk_cmd(&temp)
+        .current_dir(&nested)
+        .arg("create")
+        .arg("From child")
+        .output()
+        .expect("create runs");
+    assert!(output.status.success());
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    let ticket_path = tickets_root.join(format!("{id}.md"));
+    assert!(
+        ticket_path.exists(),
+        "ticket written to parent .tickets dir"
+    );
+}
+
+#[test]
+fn create_respects_tickets_dir_env_override() {
+    let temp = TempDir::new().unwrap();
+    let override_dir = temp.path().join("custom");
+    fs::create_dir_all(&override_dir).unwrap();
+
+    let output = tk_cmd(&temp)
+        .env("TICKETS_DIR", override_dir.to_str().unwrap())
+        .arg("create")
+        .arg("Env dir")
+        .output()
+        .expect("create runs");
+    assert!(output.status.success());
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    let ticket_path = override_dir.join(format!("{id}.md"));
+    assert!(ticket_path.exists(), "ticket written to env override dir");
+}
+
+#[test]
 fn create_requires_title_argument() {
     let temp = TempDir::new().unwrap();
 
