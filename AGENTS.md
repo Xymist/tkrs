@@ -6,21 +6,17 @@ See @README.md for usage documentation. Run `tk help` for command reference. Alw
 
 ## Architecture
 
-Single-file bash implementation (~900 lines). Uses awk for performant bulk operations on large ticket sets.
-
 Key functions:
 
 - `generate_id()` - Creates IDs from directory name prefix + timestamp hash
 - `ticket_path()` - Resolves partial IDs to full file paths
-- `yaml_field()` / `update_yaml_field()` - YAML frontmatter manipulation via sed
+- `yaml_field()` / `update_yaml_field()` - YAML frontmatter manipulation
 - `cmd_*()` - Command handlers
-- `cmd_ready()`, `cmd_blocked()`, `cmd_ls()` - awk-based bulk listing with sorting
-
-Dependencies: bash, sed, awk, find. Optional: ripgrep (faster grep), jq (for query command).
+- `cmd_ready()`, `cmd_blocked()`, `cmd_ls()`
 
 ## Changelog
 
-When committing notable changes to the `ticket` script (new commands, flags, bug fixes, behavior changes), update CHANGELOG.md in the same commit:
+When committing notable changes to the program (new commands, flags, bug fixes, behavior changes), update CHANGELOG.md in the same commit:
 
 - Create `## [Unreleased]` section at top if it doesn't exist
 - Add bullet points under appropriate heading (Added, Fixed, Changed, Removed)
@@ -43,10 +39,7 @@ git tag v0.3.0
 jj git push && git push origin v0.3.0
 ```
 
-The GitHub Actions workflow (`.github/workflows/release.yml`) automatically:
+## Testing
 
-1. Extracts the changelog section for this version as the release body
-2. Updates the Homebrew formula in `wedow/homebrew-tools` tap
-3. Updates the AUR package (builds `.SRCINFO` via Docker)
-
-Both package managers install the script as `tk` in the user's PATH.
+- Always add tests if making changes to observable behaviour. Exercise all visible features.
+- Test with `cargo nextest run`

@@ -3,6 +3,7 @@ use assert_cmd::Command;
 use assert_fs::TempDir;
 use predicates::prelude::*;
 use std::fs;
+use std::io::Write;
 
 fn tk_cmd(dir: &TempDir) -> Command {
     let mut cmd = cargo_bin_cmd!("ticket");
@@ -41,6 +42,67 @@ fn create_writes_ticket_with_defaults() {
     let contents = fs::read_to_string(ticket_path).unwrap();
     assert!(contents.contains("status: open"));
     assert!(contents.contains("# My title"));
+}
+
+#[test]
+fn create_rejects_invalid_tag_characters() {
+    let temp = TempDir::new().unwrap();
+
+    tk_cmd(&temp)
+        .arg("create")
+        .arg("Bad tags")
+        .arg("--tags")
+        .arg("alpha [bracket]")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid tag"));
+}
+
+#[test]
+fn create_supports_body_from_file() {
+    let temp = TempDir::new().unwrap();
+    let body_path = temp.path().join("body.txt");
+    fs::write(&body_path, "Custom body\nLine 2").unwrap();
+
+    let out = tk_cmd(&temp)
+        .arg("create")
+        .arg("From file")
+        .arg("--body-from-file")
+        .arg(&body_path)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    let contents =
+        fs::read_to_string(temp.path().join(".tickets").join(format!("{id}.md"))).unwrap();
+    assert!(contents.contains("# From file"));
+    assert!(contents.contains("Custom body"));
+    assert!(contents.contains("Line 2"));
+}
+
+#[test]
+fn create_supports_template_substitution() {
+    let temp = TempDir::new().unwrap();
+    let template_path = temp.path().join("tpl.md");
+    let mut tpl = fs::File::create(&template_path).unwrap();
+    writeln!(tpl, "# {{title}}\nCreated: {{created}}\nID: {{id}}\n").unwrap();
+
+    let out = tk_cmd(&temp)
+        .arg("create")
+        .arg("Tpl")
+        .arg("--template")
+        .arg(&template_path)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    let contents =
+        fs::read_to_string(temp.path().join(".tickets").join(format!("{id}.md"))).unwrap();
+    assert!(contents.contains(&format!("ID: {id}")));
+    assert!(contents.contains("Created:"));
+    assert!(contents.contains("# Tpl"));
 }
 
 #[test]

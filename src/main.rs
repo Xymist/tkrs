@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command as OsCommand;
+use std::process::{exit, Command as OsCommand};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
@@ -82,7 +82,13 @@ struct CreateArgs {
     #[arg(long = "acceptance", help = "Acceptance criteria")]
     acceptance: Option<String>,
 
-    #[arg(short = 't', long = "type", value_enum, default_value = "task", help = "Type (bug|feature|task|epic|chore)")]
+    #[arg(
+        short = 't',
+        long = "type",
+        value_enum,
+        default_value = "task",
+        help = "Type (bug|feature|task|epic|chore)"
+    )]
     ticket_type: TicketType,
 
     #[arg(
@@ -94,17 +100,43 @@ struct CreateArgs {
     )]
     priority: u8,
 
-    #[arg(short = 'a', long = "assignee", help = "Assignee [default: git user.name]")]
+    #[arg(
+        short = 'a',
+        long = "assignee",
+        help = "Assignee [default: git user.name]"
+    )]
     assignee: Option<String>,
 
-    #[arg(long = "external-ref", help = "External reference (e.g., gh-123, JIRA-456)")]
+    #[arg(
+        long = "external-ref",
+        help = "External reference (e.g., gh-123, JIRA-456)"
+    )]
     external_ref: Option<String>,
 
     #[arg(long = "parent", help = "Parent ticket ID")]
     parent: Option<String>,
 
-    #[arg(short = 'T', long = "tags", value_delimiter = ',', help = "Comma-separated tags (e.g., --tags ui,backend,urgent)")]
+    #[arg(
+        short = 'T',
+        long = "tags",
+        value_delimiter = ',',
+        help = "Comma-separated tags (e.g., --tags ui,backend,urgent)"
+    )]
     tags: Vec<String>,
+
+    #[arg(
+        long = "template",
+        value_name = "PATH",
+        help = "Use file as full body template with {id},{title},{created}"
+    )]
+    template: Option<PathBuf>,
+
+    #[arg(
+        long = "body-from-file",
+        value_name = "PATH",
+        help = "Append body content from file after the heading"
+    )]
+    body_from_file: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -854,9 +886,10 @@ fn cmd_migrate_beads() -> Result<(), String> {
             writeln!(file, "## Acceptance Criteria\n\n{}\n", acc).map_err(map_io)?;
         }
         if let Some(notes) = issue.notes.as_deref()
-            && !notes.is_empty() {
-                writeln!(file, "## Notes\n\n{}\n", notes).map_err(map_io)?;
-            }
+            && !notes.is_empty()
+        {
+            writeln!(file, "## Notes\n\n{}\n", notes).map_err(map_io)?;
+        }
 
         count += 1;
     }
@@ -951,7 +984,11 @@ struct DepEdgeArgs {
 
 #[derive(Args, Debug)]
 struct DepTreeArgs {
-    #[arg(long = "full", default_value_t = false, help = "Show all nodes (disable dedup)")]
+    #[arg(
+        long = "full",
+        default_value_t = false,
+        help = "Show all nodes (disable dedup)"
+    )]
     full: bool,
     id: String,
 }
@@ -1066,6 +1103,34 @@ fn cmd_create(args: CreateArgs) -> Result<(), String> {
         .format(&Rfc3339)
         .map_err(|e| e.to_string())?;
 
+    // Validate tags: disallow brackets/whitespace to avoid malformed frontmatter
+    for tag in &args.tags {
+        if tag.contains(['[', ']', ' ']) {
+            return Err(format!(
+                "invalid tag '{tag}': must not contain brackets or spaces"
+            ));
+        }
+    }
+
+    // Load optional template/body
+    let template_body = if let Some(path) = args.template.as_ref() {
+        Some(
+            fs::read_to_string(path)
+                .map_err(|e| format!("failed to read template {}: {e}", path.display()))?,
+        )
+    } else {
+        None
+    };
+
+    let file_body = if let Some(path) = args.body_from_file.as_ref() {
+        Some(
+            fs::read_to_string(path)
+                .map_err(|e| format!("failed to read body file {}: {e}", path.display()))?,
+        )
+    } else {
+        None
+    };
+
     let mut content = String::new();
     content.push_str("---\n");
     content.push_str(&format!("id: {id}\n"));
@@ -1089,27 +1154,46 @@ fn cmd_create(args: CreateArgs) -> Result<(), String> {
         content.push_str(&format!("tags: [{joined}]\n"));
     }
     content.push_str("---\n");
-    content.push_str(&format!("# {title}\n\n"));
 
-    if let Some(desc) = args.description {
-        content.push_str(&desc);
-        content.push_str("\n\n");
+    // Build body from template or inline pieces
+    if let Some(tpl) = template_body {
+        let body = tpl
+            .replace("{id}", &id)
+            .replace("{title}", &title)
+            .replace("{created}", &now);
+        content.push_str(&body);
+        if !content.ends_with('\n') {
+            content.push('\n');
+        }
+    } else {
+        content.push_str(&format!("# {title}\n\n"));
+
+        if let Some(desc) = args.description.as_deref() {
+            content.push_str(desc);
+            content.push_str("\n\n");
+        }
+
+        if let Some(design) = args.design.as_deref() {
+            content.push_str("## Design\n\n");
+            content.push_str(design);
+            content.push_str("\n\n");
+        }
+
+        if let Some(acc) = args.acceptance.as_deref() {
+            content.push_str("## Acceptance Criteria\n\n");
+            content.push_str(acc);
+            content.push_str("\n\n");
+        }
+
+        if let Some(body) = file_body.as_deref() {
+            content.push_str(body);
+            if !body.ends_with('\n') {
+                content.push('\n');
+            }
+        }
     }
 
-    if let Some(design) = args.design {
-        content.push_str("## Design\n\n");
-        content.push_str(&design);
-        content.push_str("\n\n");
-    }
-
-    if let Some(acc) = args.acceptance {
-        content.push_str("## Acceptance Criteria\n\n");
-        content.push_str(&acc);
-        content.push_str("\n\n");
-    }
-
-    fs::write(&file_path, content)
-        .map_err(|e| format!("failed to write ticket file: {e}"))?;
+    fs::write(&file_path, content).map_err(|e| format!("failed to write ticket file: {e}"))?;
 
     println!("{id}");
     Ok(())
@@ -1508,4 +1592,5 @@ fn main() {
 
 fn report_err(err: impl std::fmt::Display) {
     eprintln!("{err}");
+    exit(1);
 }
