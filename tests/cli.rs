@@ -736,7 +736,7 @@ fn blocked_only_open_and_missing_dep_handling() {
 
     let root_path = temp.path().join(".tickets").join(format!("{root}.md"));
     let contents = fs::read_to_string(&root_path).unwrap();
-    let mut deps = vec![
+    let mut deps = [
         open_dep.clone(),
         in_progress_dep.clone(),
         "missing-one".to_string(),

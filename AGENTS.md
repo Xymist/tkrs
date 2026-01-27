@@ -11,6 +11,7 @@ Always update the README.md usage content when adding/changing commands and flag
 - Find the next open ticket with `cargo run -- ready`
 - Implement the changes suggested in the ticket
 - Add tests for the changes and run them with `cargo nextest run`
+- Run `cargo clippy` and `cargo fmt`; fix any suggestions
 - Document what was changed, appended to the ticket
 - Mark the ticket as closed using `cargo run -- close <ticket_id>`
 - Run `jj commit -m "<ticket_number>: <ticket_title>"`

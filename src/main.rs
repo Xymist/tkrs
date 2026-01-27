@@ -333,9 +333,9 @@ fn resolve_partial_id(tickets: &[Ticket], needle: &str) -> Result<String, String
     }
 }
 
-fn read_ticket_graph(
-    include_closed: bool,
-) -> Result<(Vec<Ticket>, HashMap<String, Vec<String>>), String> {
+type TicketGraph = HashMap<String, Vec<String>>;
+
+fn read_ticket_graph(include_closed: bool) -> Result<(Vec<Ticket>, TicketGraph), String> {
     let tickets = read_all_tickets().map_err(|e| e.to_string())?;
     if tickets.is_empty() {
         return Ok((tickets, HashMap::new()));
@@ -346,8 +346,8 @@ fn read_ticket_graph(
     } else {
         tickets
             .iter()
-            .cloned()
             .filter(|t| t.status != "closed")
+            .cloned()
             .collect()
     };
 
@@ -673,7 +673,11 @@ fn cmd_link(args: LinkArgs) -> Result<(), String> {
 }
 
 fn cmd_unlink(args: UnlinkArgs) -> Result<(), String> {
-    let plan = build_link_plan(&args.id, &[args.target_id.clone()], LinkOp::Remove)?;
+    let plan = build_link_plan(
+        &args.id,
+        std::slice::from_ref(&args.target_id),
+        LinkOp::Remove,
+    )?;
 
     if plan.updates.is_empty() {
         if args.warn_missing {
@@ -884,10 +888,8 @@ fn cmd_blocked(args: BlockedArgs) -> Result<(), String> {
         let mut blockers: Vec<String> = Vec::new();
         for dep in &ticket.deps {
             if let Some(t) = lookup.get(dep) {
-                if t.status != "closed" {
-                    if !args.only_open || t.status == "open" {
-                        blockers.push(dep.clone());
-                    }
+                if t.status != "closed" && (!args.only_open || t.status == "open") {
+                    blockers.push(dep.clone());
                 }
             } else {
                 blockers.push(dep.clone());
@@ -1844,11 +1846,11 @@ fn read_ticket(path: &Path) -> io::Result<Option<Ticket>> {
             continue;
         }
 
-        if title.is_empty() {
-            if let Some(rest) = line.strip_prefix("# ") {
-                title = rest.to_string();
-                continue;
-            }
+        if title.is_empty()
+            && let Some(rest) = line.strip_prefix("# ")
+        {
+            title = rest.to_string();
+            continue;
         }
 
         if line.starts_with("## Design") {
