@@ -541,94 +541,154 @@ enum LinkOp {
     Remove,
 }
 
-struct LinkUpdate {
-    changed: bool,
+struct LinkChange {
+    ticket: Ticket,
+    before: Vec<String>,
+    after: Vec<String>,
+}
+
+struct LinkPlan {
+    updates: Vec<LinkChange>,
     missing: Vec<String>,
 }
 
-fn update_link_set(ticket: &mut Ticket, ids: &[String], op: LinkOp) -> LinkUpdate {
-    let mut set: HashSet<String> = ticket.links.iter().cloned().collect();
-    let mut missing = Vec::new();
-    let mut changed = false;
+fn build_link_plan(
+    primary_id: &str,
+    target_ids: &[String],
+    op: LinkOp,
+) -> Result<LinkPlan, String> {
+    if target_ids.is_empty() {
+        return Err("at least one target is required".to_string());
+    }
 
+    let mut unique_targets: Vec<String> = target_ids.to_vec();
+    unique_targets.sort();
+    unique_targets.dedup();
+
+    let mut tickets: HashMap<String, Ticket> = HashMap::new();
+    let primary = load_ticket_by_id(primary_id)?;
+    tickets.insert(primary.id.clone(), primary);
+
+    for id in &unique_targets {
+        let ticket = load_ticket_by_id(id)?;
+        tickets.insert(ticket.id.clone(), ticket);
+    }
+
+    let mut updates: Vec<LinkChange> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+
+    let primary_ticket = tickets
+        .get(primary_id)
+        .ok_or_else(|| "primary ticket missing".to_string())?;
+    let mut set: HashSet<String> = primary_ticket.links.iter().cloned().collect();
     match op {
         LinkOp::Add => {
-            for id in ids {
-                if set.insert(id.clone()) {
-                    changed = true;
-                }
+            for id in &unique_targets {
+                set.insert(id.clone());
             }
         }
         LinkOp::Remove => {
-            for id in ids {
-                if set.remove(id) {
-                    changed = true;
-                } else {
-                    missing.push(id.clone());
+            for id in &unique_targets {
+                if !set.remove(id) {
+                    missing.push(format!("{}<->{}", primary_ticket.id, id));
                 }
             }
         }
     }
 
-    if changed {
-        let mut links: Vec<String> = set.into_iter().collect();
-        links.sort();
-        ticket.links = links;
+    let mut after: Vec<String> = set.into_iter().collect();
+    after.sort();
+    after.dedup();
+
+    if after != primary_ticket.links {
+        updates.push(LinkChange {
+            ticket: primary_ticket.clone(),
+            before: primary_ticket.links.clone(),
+            after,
+        });
     }
 
-    LinkUpdate { changed, missing }
-}
+    for id in &unique_targets {
+        let ticket = tickets
+            .get(id)
+            .ok_or_else(|| format!("ticket '{}' missing", id))?;
+        let mut set: HashSet<String> = ticket.links.iter().cloned().collect();
+        match op {
+            LinkOp::Add => {
+                set.insert(primary_id.to_string());
+            }
+            LinkOp::Remove => {
+                if !set.remove(primary_id) {
+                    missing.push(format!("{}<->{}", primary_id, ticket.id));
+                }
+            }
+        }
 
-fn cmd_link(args: LinkArgs) -> Result<(), String> {
-    let mut primary = load_ticket_by_id(&args.id)?;
-    let mut targets: Vec<Ticket> = args
-        .targets
-        .iter()
-        .map(|t| load_ticket_by_id(t))
-        .collect::<Result<Vec<_>, _>>()?;
+        let mut after: Vec<String> = set.into_iter().collect();
+        after.sort();
+        after.dedup();
 
-    let target_ids: Vec<String> = targets.iter().map(|t| t.id.clone()).collect();
-
-    let primary_update = update_link_set(&mut primary, &target_ids, LinkOp::Add);
-    if primary_update.changed {
-        write_ticket_links(&primary.path, &primary.links)?;
-    }
-
-    for t in targets.iter_mut() {
-        let update = update_link_set(t, &[primary.id.clone()], LinkOp::Add);
-        if update.changed {
-            write_ticket_links(&t.path, &t.links)?;
+        if after != ticket.links {
+            updates.push(LinkChange {
+                ticket: ticket.clone(),
+                before: ticket.links.clone(),
+                after,
+            });
         }
     }
 
-    println!("Linked {} <-> {}", primary.id, args.targets.join(", "));
+    missing.sort();
+    missing.dedup();
+
+    Ok(LinkPlan { updates, missing })
+}
+
+fn cmd_link(args: LinkArgs) -> Result<(), String> {
+    let plan = build_link_plan(&args.id, &args.targets, LinkOp::Add)?;
+
+    if plan.updates.is_empty() {
+        println!("Links already up to date");
+        return Ok(());
+    }
+
+    if args.dry_run {
+        for change in &plan.updates {
+            println!(
+                "{}: [{}] -> [{}]",
+                change.ticket.id,
+                change.before.join(", "),
+                change.after.join(", ")
+            );
+        }
+        return Ok(());
+    }
+
+    for change in &plan.updates {
+        write_ticket_links(&change.ticket.path, &change.after)?;
+    }
+
+    let targets = args.targets.join(", ");
+    println!("Linked {} <-> {}", args.id, targets);
     Ok(())
 }
 
 fn cmd_unlink(args: UnlinkArgs) -> Result<(), String> {
-    let mut primary = load_ticket_by_id(&args.id)?;
-    let mut target = load_ticket_by_id(&args.target_id)?;
+    let plan = build_link_plan(&args.id, &[args.target_id.clone()], LinkOp::Remove)?;
 
-    let mut missing: Vec<String> = Vec::new();
-
-    let primary_result = update_link_set(&mut primary, &[target.id.clone()], LinkOp::Remove);
-    if primary_result.changed {
-        write_ticket_links(&primary.path, &primary.links)?;
-    }
-    missing.extend(primary_result.missing);
-
-    let target_result = update_link_set(&mut target, &[primary.id.clone()], LinkOp::Remove);
-    if target_result.changed {
-        write_ticket_links(&target.path, &target.links)?;
-    }
-    missing.extend(target_result.missing);
-
-    if primary_result.changed || target_result.changed {
-        println!("Unlinked {} <-> {}", primary.id, target.id);
+    if plan.updates.is_empty() {
+        if args.warn_missing {
+            println!("Warning: link {} <-> {} not found", args.id, args.target_id);
+        }
+        return Ok(());
     }
 
-    if args.warn_missing && !missing.is_empty() {
-        println!("Warning: link {} <-> {} not found", primary.id, target.id);
+    for change in &plan.updates {
+        write_ticket_links(&change.ticket.path, &change.after)?;
+    }
+
+    println!("Unlinked {} <-> {}", args.id, args.target_id);
+    if args.warn_missing && !plan.missing.is_empty() {
+        println!("Warning: link {} <-> {} not found", args.id, args.target_id);
     }
     Ok(())
 }
@@ -1215,6 +1275,13 @@ struct LinkArgs {
 
     #[arg(required = true)]
     targets: Vec<String>,
+
+    #[arg(
+        long = "dry-run",
+        default_value_t = false,
+        help = "Show planned link changes without writing"
+    )]
+    dry_run: bool,
 }
 
 #[derive(Args, Debug)]

@@ -21,7 +21,7 @@ Key functions:
 - Add tests for the changes and run them with `cargo nextest run`
 - Document what was changed, appended to the ticket
 - Mark the ticket as closed using `cargo run -- close <ticket_id>`
-- Use `jj` to commit with the message formatted as `<ticket-number>: <short-description>`
+- Run `jj commit -m "<ticket_number>: <ticket_title>"`
 
 ## Changelog
 

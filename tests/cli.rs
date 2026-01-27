@@ -1,15 +1,41 @@
-use assert_cmd::cargo::cargo_bin_cmd;
-use assert_cmd::Command;
+use assert_cmd::{Command, cargo::cargo_bin_cmd};
 use assert_fs::TempDir;
 use predicates::prelude::*;
 use std::fs;
 use std::io::Write;
+use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 fn tk_cmd(dir: &TempDir) -> Command {
     let mut cmd = cargo_bin_cmd!("ticket");
     cmd.current_dir(dir.path());
     cmd
+}
+
+fn write_ticket(dir: &TempDir, id: &str, links: &[&str]) {
+    let tickets_dir = dir.path().join(".tickets");
+    fs::create_dir_all(&tickets_dir).unwrap();
+    let path = dir.path().join(".tickets").join(format!("{id}.md"));
+    let mut file = fs::File::create(&path).unwrap();
+    writeln!(file, "---").unwrap();
+    writeln!(file, "id: {id}").unwrap();
+    writeln!(file, "status: open").unwrap();
+    writeln!(file, "deps: []").unwrap();
+    writeln!(file, "links: [{}]", links.join(", ")).unwrap();
+    writeln!(file, "created: 2026-01-01T00:00:00Z").unwrap();
+    writeln!(file, "type: task").unwrap();
+    writeln!(file, "priority: 2").unwrap();
+    writeln!(file, "---").unwrap();
+    writeln!(file, "# {id}").unwrap();
+}
+
+fn assert_links(path: impl AsRef<Path>, expected: &[&str]) {
+    let contents = fs::read_to_string(path).unwrap();
+    let needle = format!("links: [{}]", expected.join(", "));
+    assert!(
+        contents.contains(&needle),
+        "expected links line with {needle}\n{contents}"
+    );
 }
 
 #[test]
@@ -1098,11 +1124,52 @@ fn link_adds_links_bidirectionally() {
     let first_path = temp.path().join(".tickets").join(format!("{first}.md"));
     let second_path = temp.path().join(".tickets").join(format!("{second}.md"));
 
-    let first_contents = fs::read_to_string(first_path).unwrap();
-    let second_contents = fs::read_to_string(second_path).unwrap();
+    assert_links(&first_path, &[second.as_str()]);
+    assert_links(&second_path, &[first.as_str()]);
+}
 
-    assert!(first_contents.contains(&format!("links: [{second}]")));
-    assert!(second_contents.contains(&format!("links: [{first}]")));
+#[test]
+fn link_dry_run_reports_without_writing() {
+    let temp = TempDir::new().unwrap();
+
+    write_ticket(&temp, "a-1", &[]);
+    write_ticket(&temp, "b-2", &[]);
+
+    tk_cmd(&temp)
+        .arg("link")
+        .arg("a-1")
+        .arg("b-2")
+        .arg("--dry-run")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("a-1: [] -> [b-2]"))
+        .stdout(predicate::str::contains("b-2: [] -> [a-1]"));
+
+    let a_path = temp.path().join(".tickets").join("a-1.md");
+    let b_path = temp.path().join(".tickets").join("b-2.md");
+    assert_links(&a_path, &[]);
+    assert_links(&b_path, &[]);
+}
+
+#[test]
+fn link_skips_when_already_symmetric() {
+    let temp = TempDir::new().unwrap();
+
+    write_ticket(&temp, "p-1", &["t-2"]);
+    write_ticket(&temp, "t-2", &["p-1"]);
+
+    tk_cmd(&temp)
+        .arg("link")
+        .arg("p-1")
+        .arg("t-2")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Links already up to date"));
+
+    let p_path = temp.path().join(".tickets").join("p-1.md");
+    let t_path = temp.path().join(".tickets").join("t-2.md");
+    assert_links(&p_path, &["t-2"]);
+    assert_links(&t_path, &["p-1"]);
 }
 
 #[test]
