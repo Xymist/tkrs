@@ -22,6 +22,7 @@
 - t-bb55: Respect VISUAL/EDITOR precedence for `edit`, add `--print`, and non-tty fallback (2026-01-27)
 - t-bc30: Improve status validation, shared note appends, and idempotent updates (2026-01-27)
 - t-c387: Add `tk show --json` with resolved parent/dependency/link metadata and body sections (2026-01-27)
+- t-cea5: `ready` reuses cached metadata, adds `--status` and `--show-deps`, and sorts by priority/id (2026-01-27)
 
 ### Changed
 

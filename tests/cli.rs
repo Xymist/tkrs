@@ -1,4 +1,4 @@
-use assert_cmd::{Command, cargo::cargo_bin_cmd};
+use assert_cmd::{cargo::cargo_bin_cmd, Command};
 use assert_fs::TempDir;
 use predicates::prelude::*;
 use std::fs;
@@ -29,6 +29,7 @@ fn write_ticket(dir: &TempDir, id: &str, links: &[&str]) {
     writeln!(file, "# {id}").unwrap();
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_ticket_with_fields(
     dir: &TempDir,
     id: &str,
@@ -990,6 +991,99 @@ fn ready_includes_titles() {
 }
 
 #[test]
+fn ready_respects_status_filter_and_includes_counts() {
+    let temp = TempDir::new().unwrap();
+
+    // closed dependency
+    let dep_closed = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("Closed Dep").output().unwrap();
+        let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        tk_cmd(&temp).arg("close").arg(&id).assert().success();
+        id
+    };
+
+    // open ready ticket
+    let ready_open = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("Ready Open").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    tk_cmd(&temp)
+        .arg("dep")
+        .arg(&ready_open)
+        .arg(&dep_closed)
+        .assert()
+        .success();
+
+    // in_progress ready ticket
+    let ready_in_progress = {
+        let mut create = tk_cmd(&temp);
+        let out = create
+            .arg("create")
+            .arg("Ready In Progress")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    tk_cmd(&temp)
+        .arg("dep")
+        .arg(&ready_in_progress)
+        .arg(&dep_closed)
+        .assert()
+        .success();
+    tk_cmd(&temp)
+        .arg("start")
+        .arg(&ready_in_progress)
+        .assert()
+        .success();
+
+    // closed ticket should be excluded even if deps closed
+    let closed_ticket = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("Closed Ready").output().unwrap();
+        let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        tk_cmd(&temp)
+            .arg("dep")
+            .arg(&id)
+            .arg(&dep_closed)
+            .assert()
+            .success();
+        tk_cmd(&temp).arg("close").arg(&id).assert().success();
+        id
+    };
+
+    // default ready shows open and in_progress, excludes closed
+    let default_out = tk_cmd(&temp).arg("ready").output().unwrap();
+    assert!(default_out.status.success());
+    let default_stdout = String::from_utf8_lossy(&default_out.stdout);
+    assert!(default_stdout.contains(&ready_open));
+    assert!(default_stdout.contains(&ready_in_progress));
+    assert!(!default_stdout.contains(&closed_ticket));
+
+    // status filter only closed
+    let closed_out = tk_cmd(&temp)
+        .arg("ready")
+        .arg("--status")
+        .arg("closed")
+        .output()
+        .unwrap();
+    assert!(closed_out.status.success());
+    let closed_stdout = String::from_utf8_lossy(&closed_out.stdout);
+    assert!(closed_stdout.contains(&closed_ticket));
+    assert!(!closed_stdout.contains(&ready_open));
+    assert!(!closed_stdout.contains(&ready_in_progress));
+
+    // show-deps prints dependency counts
+    tk_cmd(&temp)
+        .arg("ready")
+        .arg("--show-deps")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("(deps: 1)"));
+}
+
+#[test]
 fn blocked_lists_when_dependencies_open() {
     let temp = TempDir::new().unwrap();
 
@@ -1320,12 +1414,10 @@ fn show_json_includes_resolved_titles_and_body() {
     assert_eq!(json["deps"][0]["title"], "Parent Ticket");
     assert_eq!(json["links"][0]["title"], "Parent Ticket");
     assert_eq!(json["tags"], serde_json::json!(["feat", "backend"]));
-    assert!(
-        json["body"]["raw"]
-            .as_str()
-            .unwrap()
-            .contains("# Child Ticket")
-    );
+    assert!(json["body"]["raw"]
+        .as_str()
+        .unwrap()
+        .contains("# Child Ticket"));
     assert_eq!(json["body"]["design"], "Design text");
     assert_eq!(json["body"]["acceptance"], "Do the thing");
     assert_eq!(json["body"]["notes"], "Note here");

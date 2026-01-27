@@ -942,39 +942,30 @@ fn cmd_ready(args: FilterArgs) -> Result<(), String> {
     }
 
     let lookup: HashMap<_, _> = tickets.iter().map(|t| (t.id.clone(), t)).collect();
-
-    let mut ready: Vec<&Ticket> = Vec::new();
-    for ticket in &tickets {
-        if ticket.status != "open" && ticket.status != "in_progress" {
-            continue;
-        }
-        if !ticket_matches_filters(
-            ticket,
-            None,
-            args.assignee.as_deref(),
-            args.tags.first().map(|s| s.as_str()),
-        ) {
-            continue;
-        }
-
-        let mut all_closed = true;
-        for dep in &ticket.deps {
-            if let Some(t) = lookup.get(dep) {
-                if t.status != "closed" {
-                    all_closed = false;
-                    break;
-                }
+    let status_filter = args.status.map(|s| s.as_str());
+    let mut ready: Vec<&Ticket> = tickets
+        .iter()
+        .filter(|ticket| {
+            let status_match = if let Some(s) = status_filter {
+                ticket.status == s
             } else {
-                // missing dep -> treat as not closed
-                all_closed = false;
-                break;
-            }
-        }
-
-        if all_closed {
-            ready.push(ticket);
-        }
-    }
+                ticket.status == "open" || ticket.status == "in_progress"
+            };
+            status_match
+                && ticket_matches_filters(
+                    ticket,
+                    None,
+                    args.assignee.as_deref(),
+                    args.tags.first().map(|s| s.as_str()),
+                )
+        })
+        .filter(|ticket| {
+            ticket
+                .deps
+                .iter()
+                .all(|dep| lookup.get(dep).map(|t| t.status.as_str()) == Some("closed"))
+        })
+        .collect();
 
     ready.sort_by(|a, b| {
         a.priority_value()
@@ -983,13 +974,24 @@ fn cmd_ready(args: FilterArgs) -> Result<(), String> {
     });
 
     for ticket in ready {
-        println!(
-            "{:<8} [P{}][{}] - {}",
-            ticket.id,
-            ticket.priority().unwrap_or(2),
-            ticket.status,
-            ticket.title
-        );
+        if args.show_deps {
+            println!(
+                "{:<8} [P{}][{}] - {} (deps: {})",
+                ticket.id,
+                ticket.priority().unwrap_or(2),
+                ticket.status,
+                ticket.title,
+                ticket.deps.len()
+            );
+        } else {
+            println!(
+                "{:<8} [P{}][{}] - {}",
+                ticket.id,
+                ticket.priority().unwrap_or(2),
+                ticket.status,
+                ticket.title
+            );
+        }
     }
 
     Ok(())
@@ -1772,11 +1774,21 @@ struct ListArgs {
 
 #[derive(Args, Debug)]
 struct FilterArgs {
+    #[arg(short = 's', long = "status", value_enum)]
+    status: Option<StatusValue>,
+
     #[arg(short = 'a', long = "assignee")]
     assignee: Option<String>,
 
     #[arg(short = 'T', long = "tags", value_delimiter = ',')]
     tags: Vec<String>,
+
+    #[arg(
+        long = "show-deps",
+        default_value_t = false,
+        help = "Show dependency count for each ticket"
+    )]
+    show_deps: bool,
 }
 
 #[derive(Args, Debug)]

@@ -58,7 +58,7 @@ Claude Opus picks it up naturally from there. Other models may need additional g
 - `tk start|close|reopen|status` — set ticket status (all accept `--note`; close records `closed_at` automatically)
 - `tk dep|undep|link|unlink` — manage dependencies and links (use `tk dep cycle --include-closed` to scan closed tickets too; `unlink` supports `--warn-missing`; `link` supports `--dry-run` to preview changes without writing)
 - `tk ls` — list tickets with filters (supports `--columns` and `--json`)
-- `tk ready|blocked` — show open/in-progress tickets by dependency readiness (blocked supports `--only-open`)
+- `tk ready|blocked` — show tickets with dependency readiness (`ready` supports `--status` and `--show-deps`; `blocked` supports `--only-open`)
 - `tk closed` — list recently closed tickets (supports `--limit`, `--since <RFC3339>`, `--assignee`, `--tags`)
 - `tk show|edit|add-note` — inspect and edit tickets (`show` supports `--json`)
 - `tk query [FILTER]` — output tickets as JSON; supports `--format ndjson|pretty` and built-in filters (`field==value` exact match, `field~substr` contains)
