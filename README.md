@@ -62,7 +62,7 @@ Claude Opus picks it up naturally from there. Other models may need additional g
 - `tk closed` — list recently closed tickets (supports `--limit`, `--since <RFC3339>`, `--assignee`, `--tags`)
 - `tk show|edit|add-note` — inspect and edit tickets
 - `tk query` — output tickets as JSON with optional jq filter
-- `tk migrate-beads` — import beads issues
+- `tk migrate-beads` — import beads issues from `.beads/issues.jsonl`
 
 ## License
 

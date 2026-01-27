@@ -744,6 +744,67 @@ fn migrate_beads_creates_tickets() {
 }
 
 #[test]
+fn migrate_beads_preserves_blocks_links_parent_and_notes() {
+    let temp = TempDir::new().unwrap();
+
+    let beads_dir = temp.path().join(".beads");
+    fs::create_dir_all(&beads_dir).unwrap();
+    let jsonl = beads_dir.join("issues.jsonl");
+    fs::write(
+        &jsonl,
+        r#"{"id":"x1","title":"Parent","status":"open"}
+{"id":"c1","title":"Child","status":"closed","dependencies":[{"type":"blocks","depends_on_id":"b1"},{"type":"related","depends_on_id":"r2"},{"type":"parent-child","depends_on_id":"x1"}],"notes":"First line\nSecond line"}
+"#,
+    )
+    .unwrap();
+
+    let assert = tk_cmd(&temp).arg("migrate-beads").assert().success();
+    let output = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(output.contains("Migrated 2 tickets"), "stdout: {output}");
+
+    let child = temp.path().join(".tickets/c1.md");
+    let contents = fs::read_to_string(&child).unwrap();
+    assert!(contents.contains("deps: [b1]"));
+    assert!(contents.contains("links: [r2]"));
+    assert!(contents.contains("parent: x1"));
+    assert!(contents.contains("## Notes"));
+    assert!(contents.contains("First line"));
+    assert!(contents.contains("Second line"));
+}
+
+#[test]
+fn migrate_beads_skips_malformed_records_with_warning() {
+    let temp = TempDir::new().unwrap();
+
+    let beads_dir = temp.path().join(".beads");
+    fs::create_dir_all(&beads_dir).unwrap();
+    let jsonl = beads_dir.join("issues.jsonl");
+    fs::write(
+        &jsonl,
+        r#"{ "id": "good", "title": "Good", "status":"open" }
+{ "id": "bad", "title": "", "status":"open" }
+not-json
+"#,
+    )
+    .unwrap();
+
+    let assert = tk_cmd(&temp).arg("migrate-beads").assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(stdout.contains("Migrated 1 tickets"), "stdout: {stdout}");
+    assert!(stdout.contains("skipped 2"), "stdout: {stdout}");
+    assert!(
+        String::from_utf8_lossy(&assert.get_output().stderr).contains("Warning:"),
+        "stderr: {}",
+        String::from_utf8_lossy(&assert.get_output().stderr)
+    );
+
+    let good = temp.path().join(".tickets/good.md");
+    assert!(good.exists());
+    let bad = temp.path().join(".tickets/bad.md");
+    assert!(!bad.exists());
+}
+
+#[test]
 fn undep_removes_dependency() {
     let temp = TempDir::new().unwrap();
 

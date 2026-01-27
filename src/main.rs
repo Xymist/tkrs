@@ -866,14 +866,44 @@ fn cmd_migrate_beads() -> Result<(), String> {
 
     fs::create_dir_all(tickets_dir()).map_err(|e| format!("failed to create tickets dir: {e}"))?;
 
-    let mut count = 0usize;
-    for line in reader.lines() {
-        let line = line.map_err(|e| format!("failed to read beads line: {e}"))?;
+    let mut migrated = 0usize;
+    let mut skipped = 0usize;
+
+    for (idx, line_res) in reader.lines().enumerate() {
+        let line_no = idx + 1;
+        let line = match line_res {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("Warning: failed to read beads line {line_no}: {e}");
+                skipped += 1;
+                continue;
+            }
+        };
+
         if line.trim().is_empty() {
             continue;
         }
-        let issue: BeadsIssue =
-            serde_json::from_str(&line).map_err(|e| format!("failed to parse beads issue: {e}"))?;
+
+        let issue: BeadsIssue = match serde_json::from_str(&line) {
+            Ok(val) => val,
+            Err(e) => {
+                eprintln!("Warning: malformed beads record at line {line_no}: {e}");
+                skipped += 1;
+                continue;
+            }
+        };
+
+        let id = issue.id.trim();
+        let title = issue.title.as_deref().map(str::trim).unwrap_or("");
+        let status = issue.status.as_deref().map(str::trim).unwrap_or("");
+
+        if id.is_empty() || title.is_empty() || status.is_empty() {
+            eprintln!(
+                "Warning: skipping beads record at line {line_no}: missing id/title/status"
+            );
+            skipped += 1;
+            continue;
+        }
 
         let deps = issue
             .dependencies
@@ -881,7 +911,7 @@ fn cmd_migrate_beads() -> Result<(), String> {
             .map(|deps| {
                 deps.iter()
                     .filter(|d| d.dep_type == "blocks")
-                    .filter_map(|d| d.depends_on_id.clone())
+                    .filter_map(|d| d.depends_on_id.as_deref().map(str::to_string))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -891,28 +921,22 @@ fn cmd_migrate_beads() -> Result<(), String> {
             .map(|deps| {
                 deps.iter()
                     .filter(|d| d.dep_type == "related")
-                    .filter_map(|d| d.depends_on_id.clone())
+                    .filter_map(|d| d.depends_on_id.as_deref().map(str::to_string))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
         let parent = issue.dependencies.as_ref().and_then(|deps| {
             deps.iter()
                 .find(|d| d.dep_type == "parent-child")
-                .and_then(|d| d.depends_on_id.clone())
+                .and_then(|d| d.depends_on_id.as_deref().map(str::to_string))
         });
 
-        let id = issue.id;
         let path = tickets_dir().join(format!("{id}.md"));
         let mut file = File::create(&path).map_err(|e| format!("failed to write ticket: {e}"))?;
 
         writeln!(file, "---").map_err(map_io)?;
         writeln!(file, "id: {id}").map_err(map_io)?;
-        writeln!(
-            file,
-            "status: {}",
-            issue.status.as_deref().unwrap_or("open")
-        )
-        .map_err(map_io)?;
+        writeln!(file, "status: {status}").map_err(map_io)?;
         writeln!(file, "deps: [{}]", deps.join(", ")).map_err(map_io)?;
         writeln!(file, "links: [{}]", links.join(", ")).map_err(map_io)?;
         writeln!(
@@ -929,20 +953,20 @@ fn cmd_migrate_beads() -> Result<(), String> {
         .map_err(map_io)?;
         writeln!(file, "priority: {}", issue.priority.unwrap_or(2)).map_err(map_io)?;
         if let Some(assignee) = issue.assignee.as_deref()
-            && !assignee.is_empty()
+            && !assignee.trim().is_empty()
         {
-            writeln!(file, "assignee: {assignee}").map_err(map_io)?;
+            writeln!(file, "assignee: {}", assignee.trim()).map_err(map_io)?;
         }
         if let Some(ext) = issue.external_ref.as_deref()
-            && !ext.is_empty()
+            && !ext.trim().is_empty()
         {
-            writeln!(file, "external-ref: {ext}").map_err(map_io)?;
+            writeln!(file, "external-ref: {}", ext.trim()).map_err(map_io)?;
         }
         if let Some(p) = parent.as_deref() {
             writeln!(file, "parent: {p}").map_err(map_io)?;
         }
         writeln!(file, "---").map_err(map_io)?;
-        writeln!(file, "# {}", issue.title.as_deref().unwrap_or("Untitled")).map_err(map_io)?;
+        writeln!(file, "# {title}").map_err(map_io)?;
         writeln!(file).map_err(map_io)?;
 
         if let Some(desc) = issue.description.as_deref()
@@ -963,13 +987,18 @@ fn cmd_migrate_beads() -> Result<(), String> {
         if let Some(notes) = issue.notes.as_deref()
             && !notes.is_empty()
         {
-            writeln!(file, "## Notes\n\n{}\n", notes).map_err(map_io)?;
+            writeln!(file, "## Notes\n").map_err(map_io)?;
+            write!(file, "{}", notes).map_err(map_io)?;
+            if !notes.ends_with('\n') {
+                writeln!(file).map_err(map_io)?;
+            }
+            writeln!(file).map_err(map_io)?;
         }
 
-        count += 1;
+        migrated += 1;
     }
 
-    println!("Migrated {} tickets from beads", count);
+    println!("Migrated {migrated} tickets from beads (skipped {skipped})");
     Ok(())
 }
 
