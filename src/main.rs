@@ -59,7 +59,7 @@ enum Command {
     #[command(about = "List recently closed tickets")]
     Closed(ClosedArgs),
     #[command(about = "Display ticket")]
-    Show(IdArg),
+    Show(ShowArgs),
     #[command(about = "Open ticket in $EDITOR")]
     Edit(EditArgs),
     #[command(about = "Append timestamped note")]
@@ -144,6 +144,14 @@ struct CreateArgs {
 #[derive(Args, Debug)]
 struct IdArg {
     id: String,
+}
+
+#[derive(Args, Debug)]
+struct ShowArgs {
+    id: String,
+
+    #[arg(long = "json", default_value_t = false, help = "Render ticket as JSON")]
+    json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1102,11 +1110,186 @@ fn cmd_closed(args: ClosedArgs) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_show(args: IdArg) -> Result<(), String> {
-    let path = resolve_ticket_path(&args.id)?;
-    let content = fs::read_to_string(&path).map_err(|e| format!("failed to read ticket: {e}"))?;
-    print!("{content}");
+fn cmd_show(args: ShowArgs) -> Result<(), String> {
+    let tickets = read_all_tickets().map_err(|e| e.to_string())?;
+    let lookup: HashMap<_, _> = tickets.iter().map(|t| (t.id.clone(), t)).collect();
+    let ticket = find_ticket(&tickets, &args.id)?;
+
+    let body = read_ticket_body(ticket)?;
+
+    if args.json {
+        let payload = ticket_to_json(ticket, &lookup, &body);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?
+        );
+        return Ok(());
+    }
+
+    print_ticket(ticket, &lookup, &body);
     Ok(())
+}
+
+fn find_ticket<'a>(tickets: &'a [Ticket], input: &str) -> Result<&'a Ticket, String> {
+    if let Some(t) = tickets.iter().find(|t| t.id == input) {
+        return Ok(t);
+    }
+
+    let mut matches: Vec<&Ticket> = tickets.iter().filter(|t| t.id.contains(input)).collect();
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => Err(format!("Error: ticket '{input}' not found")),
+        _ => Err(format!(
+            "Error: ambiguous ID '{input}' matches multiple tickets"
+        )),
+    }
+}
+
+fn read_ticket_body(ticket: &Ticket) -> Result<TicketBody, String> {
+    let content =
+        fs::read_to_string(&ticket.path).map_err(|e| format!("failed to read ticket: {e}"))?;
+
+    let mut parts = content.splitn(3, "---\n");
+    parts
+        .next()
+        .ok_or_else(|| "ticket missing frontmatter".to_string())?;
+    parts
+        .next()
+        .ok_or_else(|| "ticket missing frontmatter body".to_string())?;
+    let body_raw = parts
+        .next()
+        .ok_or_else(|| "ticket missing body".to_string())?
+        .to_string();
+
+    Ok(TicketBody {
+        raw: body_raw,
+        description: ticket.description.clone(),
+        design: ticket.design.clone(),
+        acceptance: ticket.acceptance.clone(),
+        notes: ticket.notes.clone(),
+    })
+}
+
+fn ticket_to_json(
+    ticket: &Ticket,
+    lookup: &HashMap<String, &Ticket>,
+    body: &TicketBody,
+) -> serde_json::Value {
+    let deps: Vec<serde_json::Value> = ticket
+        .deps
+        .iter()
+        .map(|id| {
+            let resolved = lookup.get(id).copied();
+            json!({
+                "id": id,
+                "title": resolved.map(|t| t.title.as_str()),
+                "status": resolved.map(|t| t.status.as_str()),
+            })
+        })
+        .collect();
+
+    let links: Vec<serde_json::Value> = ticket
+        .links
+        .iter()
+        .map(|id| {
+            let resolved = lookup.get(id).copied();
+            json!({
+                "id": id,
+                "title": resolved.map(|t| t.title.as_str()),
+                "status": resolved.map(|t| t.status.as_str()),
+            })
+        })
+        .collect();
+
+    let parent = ticket.parent.as_ref().map(|id| {
+        let resolved = lookup.get(id).copied();
+        json!({
+            "id": id,
+            "title": resolved.map(|t| t.title.as_str()),
+            "status": resolved.map(|t| t.status.as_str()),
+        })
+    });
+
+    json!({
+        "id": ticket.id,
+        "status": ticket.status,
+        "title": ticket.title,
+        "priority": ticket.priority.unwrap_or(2),
+        "assignee": ticket.assignee,
+        "tags": ticket.tags,
+        "created": ticket.created,
+        "external_ref": ticket.external_ref,
+        "parent": parent,
+        "deps": deps,
+        "links": links,
+        "body": {
+            "raw": body.raw,
+            "description": body.description,
+            "design": body.design,
+            "acceptance": body.acceptance,
+            "notes": body.notes,
+        }
+    })
+}
+
+fn print_ticket(ticket: &Ticket, lookup: &HashMap<String, &Ticket>, body: &TicketBody) {
+    println!("{} [{}] - {}", ticket.id, ticket.status, ticket.title);
+    println!("Priority: P{}", ticket.priority.unwrap_or(2));
+
+    if let Some(created) = &ticket.created {
+        println!("Created: {created}");
+    }
+    if let Some(assignee) = ticket.assignee() {
+        println!("Assignee: {assignee}");
+    }
+    if let Some(external) = &ticket.external_ref {
+        println!("External: {external}");
+    }
+
+    if let Some(parent_id) = ticket.parent.as_deref() {
+        let title = lookup
+            .get(parent_id)
+            .map(|t| t.title.as_str())
+            .unwrap_or("?");
+        println!("Parent: {parent_id} ({title})");
+    }
+
+    if ticket.deps.is_empty() {
+        println!("Deps: -");
+    } else {
+        let deps: Vec<String> = ticket
+            .deps
+            .iter()
+            .map(|id| {
+                let title = lookup.get(id).map(|t| t.title.as_str()).unwrap_or("?");
+                format!("{id} ({title})")
+            })
+            .collect();
+        println!("Deps: {}", deps.join(", "));
+    }
+
+    if ticket.links.is_empty() {
+        println!("Links: -");
+    } else {
+        let links: Vec<String> = ticket
+            .links
+            .iter()
+            .map(|id| {
+                let title = lookup.get(id).map(|t| t.title.as_str()).unwrap_or("?");
+                format!("{id} ({title})")
+            })
+            .collect();
+        println!("Links: {}", links.join(", "));
+    }
+
+    if ticket.tags.is_empty() {
+        println!("Tags: -");
+    } else {
+        println!("Tags: [{}]", ticket.tags.join(", "));
+    }
+
+    println!();
+    print!("{}", body.raw);
 }
 
 fn cmd_edit(args: EditArgs) -> Result<(), String> {
@@ -2015,6 +2198,14 @@ struct Ticket {
     #[allow(dead_code)]
     notes: Option<String>,
     path: PathBuf,
+}
+
+struct TicketBody {
+    raw: String,
+    description: Option<String>,
+    design: Option<String>,
+    acceptance: Option<String>,
+    notes: Option<String>,
 }
 
 impl Ticket {

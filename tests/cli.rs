@@ -29,6 +29,39 @@ fn write_ticket(dir: &TempDir, id: &str, links: &[&str]) {
     writeln!(file, "# {id}").unwrap();
 }
 
+fn write_ticket_with_fields(
+    dir: &TempDir,
+    id: &str,
+    _title: &str,
+    status: &str,
+    deps: &[&str],
+    links: &[&str],
+    tags: &[&str],
+    parent: Option<&str>,
+    body: &str,
+) {
+    let tickets_dir = dir.path().join(".tickets");
+    fs::create_dir_all(&tickets_dir).unwrap();
+    let path = dir.path().join(".tickets").join(format!("{id}.md"));
+    let mut file = fs::File::create(&path).unwrap();
+    writeln!(file, "---").unwrap();
+    writeln!(file, "id: {id}").unwrap();
+    writeln!(file, "status: {status}").unwrap();
+    writeln!(file, "deps: [{}]", deps.join(", ")).unwrap();
+    writeln!(file, "links: [{}]", links.join(", ")).unwrap();
+    writeln!(file, "created: 2026-01-01T00:00:00Z").unwrap();
+    writeln!(file, "type: task").unwrap();
+    writeln!(file, "priority: 2").unwrap();
+    if !tags.is_empty() {
+        writeln!(file, "tags: [{}]", tags.join(", ")).unwrap();
+    }
+    if let Some(p) = parent {
+        writeln!(file, "parent: {p}").unwrap();
+    }
+    writeln!(file, "---").unwrap();
+    writeln!(file, "{body}").unwrap();
+}
+
 fn assert_links(path: impl AsRef<Path>, expected: &[&str]) {
     let contents = fs::read_to_string(path).unwrap();
     let needle = format!("links: [{}]", expected.join(", "));
@@ -1064,6 +1097,104 @@ fn show_prints_ticket_contents() {
         .success()
         .stdout(predicate::str::contains(&id))
         .stdout(predicate::str::contains("My Show Ticket"));
+}
+
+#[test]
+fn show_displays_resolved_metadata_and_body() {
+    let temp = TempDir::new().unwrap();
+
+    write_ticket_with_fields(
+        &temp,
+        "parent-1",
+        "Parent Ticket",
+        "open",
+        &[],
+        &[],
+        &[],
+        None,
+        "# Parent Ticket\n\nParent body",
+    );
+
+    write_ticket_with_fields(
+        &temp,
+        "child-1",
+        "Child Ticket",
+        "open",
+        &["parent-1"],
+        &["parent-1"],
+        &["feat", "backend"],
+        Some("parent-1"),
+        "# Child Ticket\n\nChild description\n\n## Design\n\nDesign text\n\n## Acceptance Criteria\n\nDo the thing\n\n## Notes\n\nNote here",
+    );
+
+    tk_cmd(&temp)
+        .arg("show")
+        .arg("child-1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("child-1 [open] - Child Ticket"))
+        .stdout(predicate::str::contains("Parent: parent-1 (Parent Ticket)"))
+        .stdout(predicate::str::contains("Deps: parent-1 (Parent Ticket)"))
+        .stdout(predicate::str::contains("Links: parent-1 (Parent Ticket)"))
+        .stdout(predicate::str::contains("Tags: [feat, backend]"))
+        .stdout(predicate::str::contains("## Design"))
+        .stdout(predicate::str::contains("## Acceptance Criteria"))
+        .stdout(predicate::str::contains("## Notes"));
+}
+
+#[test]
+fn show_json_includes_resolved_titles_and_body() {
+    let temp = TempDir::new().unwrap();
+
+    write_ticket_with_fields(
+        &temp,
+        "parent-1",
+        "Parent Ticket",
+        "open",
+        &[],
+        &[],
+        &[],
+        None,
+        "# Parent Ticket\n\nParent body",
+    );
+
+    write_ticket_with_fields(
+        &temp,
+        "child-1",
+        "Child Ticket",
+        "open",
+        &["parent-1"],
+        &["parent-1"],
+        &["feat", "backend"],
+        Some("parent-1"),
+        "# Child Ticket\n\nChild description\n\n## Design\n\nDesign text\n\n## Acceptance Criteria\n\nDo the thing\n\n## Notes\n\nNote here",
+    );
+
+    let out = tk_cmd(&temp)
+        .arg("show")
+        .arg("child-1")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+
+    assert_eq!(json["id"], "child-1");
+    assert_eq!(json["title"], "Child Ticket");
+    assert_eq!(json["parent"]["id"], "parent-1");
+    assert_eq!(json["parent"]["title"], "Parent Ticket");
+    assert_eq!(json["deps"][0]["title"], "Parent Ticket");
+    assert_eq!(json["links"][0]["title"], "Parent Ticket");
+    assert_eq!(json["tags"], serde_json::json!(["feat", "backend"]));
+    assert!(
+        json["body"]["raw"]
+            .as_str()
+            .unwrap()
+            .contains("# Child Ticket")
+    );
+    assert_eq!(json["body"]["design"], "Design text");
+    assert_eq!(json["body"]["acceptance"], "Do the thing");
+    assert_eq!(json["body"]["notes"], "Note here");
 }
 
 #[test]
