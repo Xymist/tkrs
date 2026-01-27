@@ -1,4 +1,4 @@
-use assert_cmd::{cargo::cargo_bin_cmd, Command};
+use assert_cmd::{Command, cargo::cargo_bin_cmd};
 use assert_fs::TempDir;
 use predicates::prelude::*;
 use std::fs;
@@ -418,6 +418,39 @@ fn reopen_sets_status_open() {
     let ticket_path = temp.path().join(".tickets").join(format!("{id}.md"));
     let contents = fs::read_to_string(ticket_path).unwrap();
     assert!(contents.contains("status: open"));
+}
+
+#[test]
+fn reopen_clears_closed_at_and_adds_optional_note() {
+    let temp = TempDir::new().unwrap();
+
+    let id = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("Reopen Me").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    tk_cmd(&temp).arg("close").arg(&id).assert().success();
+
+    tk_cmd(&temp)
+        .arg("reopen")
+        .arg(&id)
+        .arg("--note")
+        .arg("because reasons")
+        .assert()
+        .success();
+
+    let path = temp.path().join(".tickets").join(format!("{id}.md"));
+    let contents = fs::read_to_string(&path).unwrap();
+    assert!(contents.contains("status: open"));
+    assert!(!contents.contains("closed_at:"));
+    assert!(contents.contains("because reasons"));
+
+    // second reopen without note is idempotent
+    tk_cmd(&temp).arg("reopen").arg(&id).assert().success();
+    let contents2 = fs::read_to_string(&path).unwrap();
+    assert!(contents2.contains("status: open"));
+    assert!(!contents2.contains("closed_at:"));
 }
 
 #[test]
@@ -1483,10 +1516,12 @@ fn show_json_includes_resolved_titles_and_body() {
     assert_eq!(json["deps"][0]["title"], "Parent Ticket");
     assert_eq!(json["links"][0]["title"], "Parent Ticket");
     assert_eq!(json["tags"], serde_json::json!(["feat", "backend"]));
-    assert!(json["body"]["raw"]
-        .as_str()
-        .unwrap()
-        .contains("# Child Ticket"));
+    assert!(
+        json["body"]["raw"]
+            .as_str()
+            .unwrap()
+            .contains("# Child Ticket")
+    );
     assert_eq!(json["body"]["design"], "Design text");
     assert_eq!(json["body"]["acceptance"], "Do the thing");
     assert_eq!(json["body"]["notes"], "Note here");

@@ -26,6 +26,7 @@
 - t-ceb5: `undep` uses shared dep mutation, is idempotent, and normalizes empty deps (2026-01-27)
 - t-dcc8: `add-note` avoids duplicate headers, normalizes newlines, and supports tagged notes (2026-01-27)
 - t-eb47: `dep tree` adds status/only-open filters and uses cached graph with stable sorting (2026-01-27)
+- t-f431: `reopen` uses shared status helper, clears closed_at, and supports optional notes (2026-01-27)
 
 ### Changed
 

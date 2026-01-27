@@ -39,7 +39,7 @@ enum Command {
     #[command(about = "Set status to closed")]
     Close(CloseArgs),
     #[command(about = "Set status to open")]
-    Reopen(IdArg),
+    Reopen(ReopenArgs),
     #[command(about = "Update status (open|in_progress|closed)")]
     Status(StatusArgs),
     #[command(about = "Manage dependencies (add/tree/cycle)")]
@@ -144,6 +144,18 @@ struct CreateArgs {
 #[derive(Args, Debug)]
 struct IdArg {
     id: String,
+}
+
+#[derive(Args, Debug)]
+struct ReopenArgs {
+    id: String,
+
+    #[arg(
+        long = "note",
+        alias = "message",
+        help = "Optional note to record when reopening"
+    )]
+    note: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -507,9 +519,7 @@ fn dep_tree(args: DepTreeArgs) -> Result<(), String> {
     stack.push((root.clone(), 0));
 
     if args.status.is_none()
-        || lookup
-            .get(&root)
-            .map(|t| t.status.as_str())
+        || lookup.get(&root).map(|t| t.status.as_str())
             == args.status.as_ref().map(StatusValue::as_str)
     {
         println!(
@@ -2158,11 +2168,9 @@ fn set_status_with_note(
                         .format(&Rfc3339)
                         .map_err(|e| e.to_string())?;
                     output.push_str(&format!("closed_at: {}\n", ts));
-                } else {
-                    output.push_str(line);
-                    output.push('\n');
+                    closed_written = true;
                 }
-                closed_written = true;
+                // On reopen, drop closed_at by not writing it back
             } else {
                 output.push_str(line);
                 output.push('\n');
@@ -2710,8 +2718,13 @@ fn cmd_close(args: CloseArgs) -> Result<(), String> {
     set_status_with_note(&args.id, StatusValue::Closed, args.note.as_deref(), true)
 }
 
-fn cmd_reopen(args: IdArg) -> Result<(), String> {
-    set_status_with_note(&args.id, StatusValue::Open, None, false)
+fn cmd_reopen(args: ReopenArgs) -> Result<(), String> {
+    set_status_with_note(
+        &args.id,
+        StatusValue::Open,
+        args.note.as_deref(),
+        args.note.is_some(),
+    )
 }
 
 fn cmd_status(args: StatusArgs) -> Result<(), String> {
