@@ -60,7 +60,7 @@ Claude Opus picks it up naturally from there. Other models may need additional g
 - `tk ls` — list tickets with filters (supports `--columns` and `--json`)
 - `tk ready|blocked` — show tickets with dependency readiness (`ready` supports `--status` and `--show-deps`; `blocked` supports `--only-open`)
 - `tk closed` — list recently closed tickets (supports `--limit`, `--since <RFC3339>`, `--assignee`, `--tags`)
-- `tk show|edit|add-note` — inspect and edit tickets (`show` supports `--json`)
+- `tk show|edit|add-note` — inspect and edit tickets (`show` supports `--json`; `add-note` is idempotent on headers and supports `--tag <label>`)
 - `tk query [FILTER]` — output tickets as JSON; supports `--format ndjson|pretty` and built-in filters (`field==value` exact match, `field~substr` contains)
 - `tk migrate-beads` — import beads issues from `.beads/issues.jsonl`
 

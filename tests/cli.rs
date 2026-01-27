@@ -1498,6 +1498,44 @@ fn add_note_appends_notes_section_and_text() {
 }
 
 #[test]
+fn add_note_avoids_duplicate_headers_and_supports_tag_and_newlines() {
+    let temp = TempDir::new().unwrap();
+
+    let id = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("Note Test").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    // First note inserts header
+    tk_cmd(&temp)
+        .arg("add-note")
+        .arg(&id)
+        .arg("First note")
+        .assert()
+        .success();
+
+    // Second note should not duplicate header, and supports tag with trailing newlines
+    tk_cmd(&temp)
+        .arg("add-note")
+        .arg(&id)
+        .arg("Second note with trailing\n\n")
+        .arg("--tag")
+        .arg("infra")
+        .assert()
+        .success();
+
+    let path = temp.path().join(".tickets").join(format!("{id}.md"));
+    let contents = fs::read_to_string(path).unwrap();
+    let notes_sections: Vec<_> = contents.match_indices("## Notes").collect();
+    assert_eq!(notes_sections.len(), 1, "expected single Notes header");
+    assert!(contents.contains("First note"));
+    assert!(contents.contains("Second note with trailing"));
+    assert!(contents.contains("[infra] **"));
+    assert!(contents.ends_with('\n'));
+}
+
+#[test]
 fn query_outputs_ndjson_and_pretty_and_filters_without_jq() {
     let temp = TempDir::new().unwrap();
 

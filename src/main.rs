@@ -1688,16 +1688,27 @@ fn cmd_add_note(args: AddNoteArgs) -> Result<(), String> {
         .format(&Rfc3339)
         .map_err(|e| e.to_string())?;
 
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .append(true)
         .open(&path)
         .map_err(|e| format!("failed to open ticket: {e}"))?;
+    let mut writer = BufWriter::new(file);
 
     let contents = fs::read_to_string(&path).map_err(|e| format!("failed to read ticket: {e}"))?;
-    if !contents.contains("## Notes") {
-        writeln!(file, "\n## Notes").map_err(map_io)?;
+    let has_notes = contents.contains("## Notes");
+    if !has_notes {
+        writeln!(writer, "\n## Notes").map_err(map_io)?;
     }
-    writeln!(file, "\n**{}**\n\n{}", timestamp, note_text.trim_end()).map_err(map_io)?;
+
+    let trimmed = note_text.trim_end_matches(['\n', '\r']);
+    let tag_prefix = args
+        .tag
+        .as_ref()
+        .map(|t| format!("[{}] ", t.trim()))
+        .unwrap_or_default();
+    writeln!(writer, "\n{}**{}**\n\n{}\n", tag_prefix, timestamp, trimmed).map_err(map_io)?;
+    writer.flush().map_err(map_io)?;
+
     println!(
         "Note added to {}",
         path.file_stem().unwrap_or_default().to_string_lossy()
@@ -1842,6 +1853,13 @@ struct ClosedArgs {
 struct AddNoteArgs {
     id: String,
     text: Option<String>,
+
+    #[arg(
+        long = "tag",
+        value_name = "LABEL",
+        help = "Optional tag label to prefix the note with"
+    )]
+    tag: Option<String>,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
