@@ -700,18 +700,33 @@ fn cmd_closed(args: ClosedArgs) -> Result<(), String> {
         return Ok(());
     }
 
-    // Sort by mtime descending using metadata; fallback to id order on errors
-    tickets.sort_by(|a, b| {
-        let ma = fs::metadata(&a.path).and_then(|m| m.modified());
-        let mb = fs::metadata(&b.path).and_then(|m| m.modified());
-        match (ma, mb) {
-            (Ok(ta), Ok(tb)) => tb.cmp(&ta),
-            _ => a.id.cmp(&b.id),
+    let since = if let Some(since_str) = args.since.as_deref() {
+        match OffsetDateTime::parse(since_str, &Rfc3339) {
+            Ok(dt) => Some(dt),
+            Err(_) => return Err("invalid --since; expected RFC3339 timestamp".to_string()),
         }
+    } else {
+        None
+    };
+
+    let mut enriched: Vec<(Ticket, Option<OffsetDateTime>)> = Vec::new();
+    for t in tickets.drain(..) {
+        let mtime = fs::metadata(&t.path)
+            .and_then(|m| m.modified())
+            .ok()
+            .map(OffsetDateTime::from);
+        enriched.push((t, mtime));
+    }
+
+    enriched.sort_by(|(a, ma), (b, mb)| match (ma, mb) {
+        (Some(ta), Some(tb)) => tb.cmp(ta).then_with(|| a.id.cmp(&b.id)),
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, None) => a.id.cmp(&b.id),
     });
 
     let mut shown = 0u32;
-    for ticket in tickets {
+    for (ticket, mtime) in enriched {
         if shown >= args.limit {
             break;
         }
@@ -726,6 +741,14 @@ fn cmd_closed(args: ClosedArgs) -> Result<(), String> {
         if let Some(tag) = args.tags.first()
             && !ticket.tags.iter().any(|t| t == tag)
         {
+            continue;
+        }
+        if let (Some(since_dt), Some(modified)) = (since, mtime) {
+            if modified < since_dt {
+                continue;
+            }
+        } else if since.is_some() && mtime.is_none() {
+            // missing mtime, treat as older than since
             continue;
         }
 
@@ -1038,6 +1061,13 @@ struct ClosedArgs {
 
     #[arg(short = 'T', long = "tags", value_delimiter = ',')]
     tags: Vec<String>,
+
+    #[arg(
+        long = "since",
+        value_name = "RFC3339",
+        help = "Only list tickets modified on/after this time"
+    )]
+    since: Option<String>,
 }
 
 #[derive(Args, Debug)]

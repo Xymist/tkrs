@@ -1,9 +1,10 @@
-use assert_cmd::cargo::cargo_bin_cmd;
 use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 use assert_fs::TempDir;
 use predicates::prelude::*;
 use std::fs;
 use std::io::Write;
+use std::time::{Duration, SystemTime};
 
 fn tk_cmd(dir: &TempDir) -> Command {
     let mut cmd = cargo_bin_cmd!("ticket");
@@ -459,6 +460,55 @@ fn closed_lists_recent_closed_with_filters() {
         .success()
         .stdout(predicate::str::contains(&recent_closed))
         .stdout(predicate::str::contains(&old_closed).not());
+}
+
+#[test]
+fn closed_supports_since_and_fallback_ordering() {
+    let temp = TempDir::new().unwrap();
+
+    let no_mtime_id = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("No Mtime").output().unwrap();
+        let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        tk_cmd(&temp).arg("close").arg(&id).assert().success();
+        let path = temp.path().join(".tickets").join(format!("{id}.md"));
+        filetime::set_file_mtime(
+            &path,
+            filetime::FileTime::from_system_time(SystemTime::UNIX_EPOCH),
+        )
+        .unwrap();
+        id
+    };
+
+    let recent_id = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("Recent").output().unwrap();
+        let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        tk_cmd(&temp).arg("close").arg(&id).assert().success();
+        id
+    };
+
+    let future = SystemTime::now() + Duration::from_secs(10);
+    let since = time::OffsetDateTime::from(future)
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+
+    // since in the future should produce no output
+    tk_cmd(&temp)
+        .arg("closed")
+        .arg("--since")
+        .arg(&since)
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+
+    // fallback ordering: missing mtime should sort by id after real mtimes
+    tk_cmd(&temp)
+        .arg("closed")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&recent_id))
+        .stdout(predicate::str::contains(&no_mtime_id));
 }
 
 #[test]

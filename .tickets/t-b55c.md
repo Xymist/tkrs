@@ -14,7 +14,8 @@ tags: [optimize, cli]
 How: add JSON escaping, support ndjson/pretty formats, and stream fields directly; Why: prevent invalid JSON and make script consumption reliable.
 
 ## Implementation plan
-- In `cmd_query`, avoid routing through `jq` unless a filter is provided; emit NDJSON by default with proper JSON escaping (use `serde_json::to_writer` to stdout for streaming).
-- Add `--format ndjson|pretty` flag: ndjson writes one object per line; pretty uses `to_string_pretty`; retain `--filter` to pipe into `jq` only after serialization.
+
+- In `cmd_query`, perform filtering in-memory when a filter is supplied and otherwise emit NDJSON with proper JSON escaping (use `serde_json::to_writer` to stdout for streaming).
+- Add `--format ndjson|pretty` flag: ndjson writes one object per line; pretty uses `to_string_pretty`; keep filter semantics consistent without requiring external tools.
 - Stream tickets: iterate and write directly to stdout to reduce memory; ensure fields like `title` and `description` are escaped.
-- Add tests covering ndjson vs pretty, filter passthrough when jq is unavailable, and large ticket sets (no quadratic buffering).
+- Add tests covering ndjson vs pretty, filter behavior without external tools, and large ticket sets (no quadratic buffering).

@@ -52,6 +52,18 @@ This project uses a CLI ticket system for task management. Run `tk help` when yo
 
 Claude Opus picks it up naturally from there. Other models may need additional guidance.
 
+## Commands
+
+- `tk create` — create a ticket with optional fields
+- `tk start|close|reopen|status` — set ticket status
+- `tk dep|undep|link|unlink` — manage dependencies and links
+- `tk ls` — list tickets with filters
+- `tk ready|blocked` — show open/in-progress tickets by dependency readiness
+- `tk closed` — list recently closed tickets (supports `--limit`, `--since <RFC3339>`, `--assignee`, `--tags`)
+- `tk show|edit|add-note` — inspect and edit tickets
+- `tk query` — output tickets as JSON with optional jq filter
+- `tk migrate-beads` — import beads issues
+
 ## License
 
 MIT

@@ -14,6 +14,7 @@ tags: [optimize, cli]
 How: reuse cached graph metadata, switch to asorti ordering, and add --status/--only-open filters; Why: improves speed and readability on large graphs.
 
 ## Implementation plan
+
 - Build a graph cache once (id -> deps/status/title) and reuse it for traversal to avoid repeated file reads during `dep tree`.
 - Add flags `--status` (filter nodes by status) and `--only-open` to skip closed deps while rendering; defaults to current behavior.
 - Sort children with a consistent comparator (id or priority when available) before printing to stabilize output across runs.

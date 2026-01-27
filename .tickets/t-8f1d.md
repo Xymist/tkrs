@@ -14,6 +14,7 @@ tags: [optimize, cli]
 How: build link sets in memory, write once per file, and skip rewrites when unchanged; Why: faster on many tickets and guarantees symmetry.
 
 ## Implementation plan
+
 - Introduce a reusable link-set builder that reads both primary and targets once, merges links in memory, and writes only when changed; share it with `unlink`.
 - Normalize order (sorted, deduped) before comparing/writing to guarantee symmetric sets and minimize diffs.
 - Add a dry-run flag to print intended changes without writing, useful on large batches.

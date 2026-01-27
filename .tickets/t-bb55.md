@@ -14,6 +14,7 @@ tags: [optimize, cli]
 How: respect VISUAL/EDITOR precedence, add --print path for non-tty, and validate ticket existence before launch; Why: better UX in shells and automations.
 
 ## Implementation plan
+
 - Validate ticket exists before launching editor; reuse `resolve_ticket_path` and avoid double reads.
 - Choose editor using precedence VISUAL > EDITOR > `vi`; add `--print` flag to just echo the path when running in non-interactive contexts.
 - Detect non-tty stdout and fallback to `--print` behavior unless explicitly forced to open, to avoid blocking in CI.

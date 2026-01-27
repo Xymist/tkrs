@@ -14,6 +14,7 @@ tags: [optimize, cli]
 How: enforce trailing newline, avoid duplicate Notes headers, and allow --tag metadata; Why: prevent formatting drift and support structured notes.
 
 ## Implementation plan
+
 - Ensure `add-note` always appends a trailing newline and inserts `## Notes` once; detect existing section to avoid duplicates.
 - Add `--tag <label>` option that prefixes the note with a tag (e.g., `[infra]`) before the timestamp or within the note block.
 - Write notes via buffered append with newline normalization to prevent missing separators between notes.
