@@ -70,8 +70,8 @@ enum Command {
 
 #[derive(Args, Debug)]
 struct CreateArgs {
-    /// Optional ticket title
-    title: Option<String>,
+    /// Ticket title (required)
+    title: String,
 
     #[arg(short = 'd', long = "description", help = "Description text")]
     description: Option<String>,
@@ -1356,7 +1356,11 @@ fn cmd_create(args: CreateArgs) -> Result<(), String> {
     let tickets_dir = tickets_dir();
     fs::create_dir_all(&tickets_dir).map_err(|e| format!("failed to create tickets dir: {e}"))?;
 
-    let title = args.title.unwrap_or_else(|| "Untitled".to_string());
+    let title = args.title.trim();
+    if title.is_empty() {
+        return Err("Title is required".to_string());
+    }
+    let title = title.to_string();
     let assignee = args.assignee.or_else(git_user_name);
     let id = generate_id().map_err(|e| format!("failed to generate id: {e}"))?;
     let file_path = tickets_dir.join(format!("{id}.md"));

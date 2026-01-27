@@ -46,6 +46,29 @@ fn create_writes_ticket_with_defaults() {
 }
 
 #[test]
+fn create_requires_title_argument() {
+    let temp = TempDir::new().unwrap();
+
+    tk_cmd(&temp)
+        .arg("create")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Usage: tk create <TITLE>"));
+}
+
+#[test]
+fn create_rejects_empty_title() {
+    let temp = TempDir::new().unwrap();
+
+    tk_cmd(&temp)
+        .arg("create")
+        .arg("   ")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Title is required"));
+}
+
+#[test]
 fn create_rejects_invalid_tag_characters() {
     let temp = TempDir::new().unwrap();
 

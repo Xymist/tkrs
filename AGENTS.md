@@ -16,7 +16,7 @@ Key functions:
 
 ## Workflow
 
-- Find the next open ticket, ordering alphabetically, in .tickets
+- Find the next open ticket with `cargo run -- ready`
 - Implement the changes suggested in the ticket
 - Add tests for the changes and run them with `cargo nextest run`
 - Document what was changed, appended to the ticket
