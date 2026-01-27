@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufWriter, Read, Write};
+use std::io::{self, BufRead, BufWriter, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as OsCommand, exit};
 
@@ -61,7 +61,7 @@ enum Command {
     #[command(about = "Display ticket")]
     Show(IdArg),
     #[command(about = "Open ticket in $EDITOR")]
-    Edit(IdArg),
+    Edit(EditArgs),
     #[command(about = "Append timestamped note")]
     AddNote(AddNoteArgs),
     #[command(about = "Output tickets as JSON, optionally filtered")]
@@ -144,6 +144,25 @@ struct CreateArgs {
 #[derive(Args, Debug)]
 struct IdArg {
     id: String,
+}
+
+#[derive(Args, Debug)]
+struct EditArgs {
+    id: String,
+
+    #[arg(
+        long = "print",
+        default_value_t = false,
+        help = "Print the ticket path instead of launching an editor"
+    )]
+    print: bool,
+
+    #[arg(
+        long = "force",
+        default_value_t = false,
+        help = "Force launching editor even when stdout is not a TTY"
+    )]
+    force: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1083,9 +1102,19 @@ fn cmd_show(args: IdArg) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_edit(args: IdArg) -> Result<(), String> {
+fn cmd_edit(args: EditArgs) -> Result<(), String> {
     let path = resolve_ticket_path(&args.id)?;
-    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+
+    let stdout_is_tty = io::stdout().is_terminal();
+    if args.print || (!stdout_is_tty && !args.force) {
+        println!("{}", path.display());
+        return Ok(());
+    }
+
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+
     let status = OsCommand::new(editor)
         .arg(&path)
         .status()

@@ -1013,6 +1013,36 @@ fn edit_uses_editor_and_succeeds() {
 }
 
 #[test]
+fn edit_respects_visual_then_editor_and_print_mode() {
+    let temp = TempDir::new().unwrap();
+
+    let id = {
+        let out = tk_cmd(&temp).arg("create").arg("Edit Me").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    // print mode
+    let print_out = tk_cmd(&temp)
+        .arg("edit")
+        .arg(&id)
+        .arg("--print")
+        .output()
+        .unwrap();
+    assert!(print_out.status.success());
+    let printed = String::from_utf8_lossy(&print_out.stdout);
+    assert!(printed.contains(&id));
+
+    // VISUAL takes precedence over EDITOR
+    tk_cmd(&temp)
+        .env("VISUAL", "printf")
+        .env("EDITOR", "false")
+        .arg("edit")
+        .arg(&id)
+        .assert()
+        .success();
+}
+
+#[test]
 fn add_note_appends_notes_section_and_text() {
     let temp = TempDir::new().unwrap();
 
