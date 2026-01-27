@@ -16,24 +16,11 @@ VS Code allows you to Ctrl+Click or Cmd+Click the ID and jump directly to the fi
 
 ## Install
 
-**Homebrew (macOS/Linux):**
-
-```bash
-brew tap wedow/tools
-brew install ticket
-```
-
-**Arch Linux (AUR):**
-
-```bash
-yay -S ticket  # or paru, etc.
-```
-
 **From source (auto-updates on git pull):**
 
 ```bash
-git clone https://github.com/wedow/ticket.git
-cd ticket && ln -s "$PWD/ticket" ~/.local/bin/tk
+git clone https://github.com/xymist/tkrs.git
+cd tkrs && cargo build --release && ln -s "$PWD/target/release/tkrs" ~/.local/bin/tk
 ```
 
 **Or** just copy `ticket` to somewhere in your PATH.
@@ -66,7 +53,7 @@ Claude Opus picks it up naturally from there. Other models may need additional g
 
 ## Release workflow
 
-Pushing a tag matching `vX.Y.Z` triggers the GitHub Actions workflow `.github/workflows/release.yml` to build the Rust binary in release mode and publish a versioned tarball (`ticket-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`) as a GitHub release asset.
+Pushing a tag matching `vX.Y.Z` triggers the GitHub Actions workflow `.github/workflows/release.yml` to build the Rust binary in release mode and publish a versioned tarball (`tk-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`) as a GitHub release asset.
 
 ## License
 

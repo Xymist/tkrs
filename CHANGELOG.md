@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.4.0] - 2026-01-27
 
 ### Added
 
@@ -27,7 +27,7 @@
 - t-dcc8: `add-note` avoids duplicate headers, normalizes newlines, and supports tagged notes (2026-01-27)
 - t-eb47: `dep tree` adds status/only-open filters and uses cached graph with stable sorting (2026-01-27)
 - t-f431: `reopen` uses shared status helper, clears closed_at, and supports optional notes (2026-01-27)
-- tic-2797: GitHub Actions release workflow builds and publishes tagged binaries (2026-01-27)
+- tic-2797: GitHub Actions release workflow builds and publishes tagged binaries, packaging `tk` tarballs (2026-01-27)
 
 ### Changed
 

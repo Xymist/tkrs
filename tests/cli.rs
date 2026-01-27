@@ -7,7 +7,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 fn tk_cmd(dir: &TempDir) -> Command {
-    let mut cmd = cargo_bin_cmd!("ticket");
+    let mut cmd = cargo_bin_cmd!("tk");
     cmd.current_dir(dir.path());
     cmd
 }
