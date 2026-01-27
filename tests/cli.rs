@@ -278,6 +278,79 @@ fn status_sets_requested_value() {
 }
 
 #[test]
+fn status_rejects_invalid_value() {
+    let temp = TempDir::new().unwrap();
+    let id = {
+        let out = tk_cmd(&temp).arg("create").arg("Oops").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    tk_cmd(&temp)
+        .arg("status")
+        .arg(&id)
+        .arg("done")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid status"));
+}
+
+#[test]
+fn status_appends_note_and_accepts_case_insensitive_value() {
+    let temp = TempDir::new().unwrap();
+    let id = {
+        let out = tk_cmd(&temp).arg("create").arg("Case").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    tk_cmd(&temp)
+        .arg("status")
+        .arg(&id)
+        .arg("In-Progress")
+        .arg("--note")
+        .arg("moving")
+        .assert()
+        .success();
+
+    let path = temp.path().join(".tickets").join(format!("{id}.md"));
+    let contents = fs::read_to_string(&path).unwrap();
+    assert!(contents.contains("status: in_progress"));
+    assert!(contents.contains("## Notes"));
+    assert!(contents.contains("moving"));
+}
+
+#[test]
+fn status_is_idempotent_without_note_for_same_value() {
+    let temp = TempDir::new().unwrap();
+    let id = {
+        let out = tk_cmd(&temp).arg("create").arg("Same").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    tk_cmd(&temp)
+        .arg("status")
+        .arg(&id)
+        .arg("closed")
+        .assert()
+        .success();
+
+    let path = temp.path().join(".tickets").join(format!("{id}.md"));
+    let contents = fs::read_to_string(&path).unwrap();
+    assert_eq!(contents.matches("status: closed").count(), 1);
+    assert_eq!(contents.matches("closed_at:").count(), 1);
+
+    tk_cmd(&temp)
+        .arg("status")
+        .arg(&id)
+        .arg("CLOSED")
+        .assert()
+        .success();
+
+    let again = fs::read_to_string(&path).unwrap();
+    assert_eq!(again.matches("status: closed").count(), 1);
+    assert_eq!(again.matches("closed_at:").count(), 1);
+}
+
+#[test]
 fn dep_add_appends_dependency() {
     let temp = TempDir::new().unwrap();
 
