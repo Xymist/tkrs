@@ -53,7 +53,7 @@ Claude Opus picks it up naturally from there. Other models may need additional g
 
 ## Release workflow
 
-Pushing a tag matching `vX.Y.Z` triggers the GitHub Actions workflow `.github/workflows/release.yml` to build the Rust binary in release mode and publish a versioned tarball (`tk-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`) as a GitHub release asset.
+Pushing a tag matching `vX.Y.Z` triggers the GitHub Actions workflow `.github/workflows/release.yml` to build the Rust binary in release mode and publish a versioned tarball (`tk-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`) as a GitHub release asset. The workflow can also be run manually (`workflow_dispatch`) by providing the tag to build.
 
 ## License
 

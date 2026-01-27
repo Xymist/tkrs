@@ -6,6 +6,7 @@ on:
       tag:
         description: 'Tag to release (e.g., v0.1.0)'
         required: true
+        type: string
   push:
     tags:
       - "v*.*.*"
@@ -15,9 +16,20 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      TAG: ${{ github.ref_type == 'tag' && github.ref_name || github.event.inputs.tag }}
     steps:
+      - name: Validate tag
+        run: |
+          if [ -z "${TAG}" ]; then
+            echo "TAG is required for this workflow" >&2
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -28,7 +40,7 @@ jobs:
       - name: Package artifact
         id: package
         run: |
-          ARTIFACT="tk-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu.tar.gz"
+          ARTIFACT="tk-${TAG}-x86_64-unknown-linux-gnu.tar.gz"
           mkdir -p dist
           tar -C target/release -czf "dist/${ARTIFACT}" tk
           echo "artifact_path=dist/${ARTIFACT}" >> "$GITHUB_OUTPUT"
@@ -40,8 +52,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ github.ref_name }}
-          release_name: ${{ github.ref_name }}
+          tag_name: ${{ env.TAG }}
+          release_name: ${{ env.TAG }}
           draft: false
           prerelease: false
 
