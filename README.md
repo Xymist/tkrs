@@ -61,7 +61,7 @@ Claude Opus picks it up naturally from there. Other models may need additional g
 - `tk ready|blocked` — show open/in-progress tickets by dependency readiness (blocked supports `--only-open`)
 - `tk closed` — list recently closed tickets (supports `--limit`, `--since <RFC3339>`, `--assignee`, `--tags`)
 - `tk show|edit|add-note` — inspect and edit tickets
-- `tk query` — output tickets as JSON with optional jq filter
+- `tk query [FILTER]` — output tickets as JSON; supports `--format ndjson|pretty` and built-in filters (`field==value` exact match, `field~substr` contains)
 - `tk migrate-beads` — import beads issues from `.beads/issues.jsonl`
 
 ## License

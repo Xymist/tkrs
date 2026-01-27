@@ -929,7 +929,7 @@ fn add_note_appends_notes_section_and_text() {
 }
 
 #[test]
-fn query_outputs_json_and_filters_with_jq() {
+fn query_outputs_ndjson_and_pretty_and_filters_without_jq() {
     let temp = TempDir::new().unwrap();
 
     let one = {
@@ -956,20 +956,64 @@ fn query_outputs_json_and_filters_with_jq() {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     };
 
-    tk_cmd(&temp)
-        .arg("query")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(&one))
-        .stdout(predicate::str::contains(&two));
+    // Default: ndjson one object per line
+    let out = tk_cmd(&temp).arg("query").output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<_> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "expected ndjson lines");
+    for line in &lines {
+        serde_json::from_str::<serde_json::Value>(line).expect("valid ndjson");
+    }
+    assert!(stdout.contains(&one));
+    assert!(stdout.contains(&two));
 
+    // Pretty array output
+    let pretty = tk_cmd(&temp)
+        .arg("query")
+        .arg("--format")
+        .arg("pretty")
+        .output()
+        .unwrap();
+    assert!(pretty.status.success());
+    let val: serde_json::Value = serde_json::from_slice(&pretty.stdout).unwrap();
+    let arr = val.as_array().expect("array");
+    assert_eq!(arr.len(), 2);
+
+    // Built-in filtering: tag match and substring match
     tk_cmd(&temp)
         .arg("query")
-        .arg(".[] | select(.tags[]? == \"x\")")
+        .arg("tags==x")
         .assert()
         .success()
         .stdout(predicate::str::contains(&one))
         .stdout(predicate::str::contains(&two).not());
+
+    tk_cmd(&temp)
+        .arg("query")
+        .arg("title~Two")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&two))
+        .stdout(predicate::str::contains(&one).not());
+}
+
+#[test]
+fn query_handles_large_ticket_sets_without_quadratic_output() {
+    let temp = TempDir::new().unwrap();
+
+    let mut created = Vec::new();
+    for idx in 0..200 {
+        let id = format!("bulk-{idx:03}");
+        write_ticket(&temp, &id, &[]);
+        created.push(id);
+    }
+
+    let out = tk_cmd(&temp).arg("query").output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<_> = stdout.lines().collect();
+    assert_eq!(lines.len(), created.len());
 }
 
 #[test]

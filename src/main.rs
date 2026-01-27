@@ -3,13 +3,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, BufRead, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as OsCommand, exit};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
+use serde::ser::{SerializeSeq, Serializer};
 use serde_json::json;
+use serde_json::ser::PrettyFormatter;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -1178,36 +1180,163 @@ fn cmd_migrate_beads() -> Result<(), String> {
 
 fn cmd_query(args: QueryArgs) -> Result<(), String> {
     let tickets = read_all_tickets().map_err(|e| e.to_string())?;
-    let filter = args.filter;
-
     let mut items: Vec<serde_json::Value> = tickets.iter().map(|t| t.to_json()).collect();
     items.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
 
-    if let Some(filt) = filter {
-        let data = serde_json::to_string(&items).map_err(|e| e.to_string())?;
-        let mut child = OsCommand::new("jq")
-            .arg(filt)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|_| "jq not available for filtering".to_string())?;
-        if let Some(stdin) = child.stdin.as_mut() {
-            stdin.write_all(data.as_bytes()).map_err(map_io)?;
-        }
-        let out = child.wait_with_output().map_err(map_io)?;
-        if !out.status.success() {
-            return Err("jq filter failed".to_string());
-        }
-        print!("{}", String::from_utf8_lossy(&out.stdout));
+    if let Some(filter) = args.filter.as_deref() {
+        let filtered = apply_query_filter(&items, filter)?;
+        write_query_output(&filtered, args.format)
     } else {
-        for item in items {
-            println!(
-                "{}",
-                serde_json::to_string(&item).map_err(|e| e.to_string())?
-            );
+        write_query_output(&items, args.format)
+    }
+}
+
+fn apply_query_filter(
+    items: &[serde_json::Value],
+    filter: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    // Simple built-in filter language: field==value for exact match, field~substr for substring contains
+    // Supports nested fields with dot notation (e.g., tags==backend matches any array entry)
+    #[derive(Clone, Copy)]
+    enum Op {
+        Eq,
+        Contains,
+    }
+
+    let (path, op, needle) = if let Some(rest) = filter.split_once("==") {
+        (rest.0.trim(), Op::Eq, rest.1.trim())
+    } else if let Some(rest) = filter.split_once('~') {
+        (rest.0.trim(), Op::Contains, rest.1.trim())
+    } else {
+        return Err("invalid filter; expected field==value or field~value".to_string());
+    };
+
+    if path.is_empty() || needle.is_empty() {
+        return Err("filter parts must be non-empty".to_string());
+    }
+
+    let keys: Vec<&str> = path.split('.').collect();
+
+    fn value_matches(v: &serde_json::Value, op: Op, needle: &str) -> bool {
+        match v {
+            serde_json::Value::String(s) => match op {
+                Op::Eq => s == needle,
+                Op::Contains => s.contains(needle),
+            },
+            serde_json::Value::Number(n) => {
+                if let Some(as_u64) = n.as_u64() {
+                    match op {
+                        Op::Eq => needle
+                            .parse::<u64>()
+                            .ok()
+                            .map(|i| i == as_u64)
+                            .unwrap_or(false),
+                        Op::Contains => false,
+                    }
+                } else if let Some(as_i64) = n.as_i64() {
+                    match op {
+                        Op::Eq => needle
+                            .parse::<i64>()
+                            .ok()
+                            .map(|i| i == as_i64)
+                            .unwrap_or(false),
+                        Op::Contains => false,
+                    }
+                } else if let Some(as_f64) = n.as_f64() {
+                    match op {
+                        Op::Eq => needle
+                            .parse::<f64>()
+                            .ok()
+                            .map(|i| (i - as_f64).abs() < f64::EPSILON)
+                            .unwrap_or(false),
+                        Op::Contains => false,
+                    }
+                } else {
+                    false
+                }
+            }
+            serde_json::Value::Bool(b) => match op {
+                Op::Eq => needle
+                    .parse::<bool>()
+                    .ok()
+                    .map(|i| i == *b)
+                    .unwrap_or(false),
+                Op::Contains => false,
+            },
+            serde_json::Value::Array(arr) => arr.iter().any(|elem| value_matches(elem, op, needle)),
+            serde_json::Value::Object(map) => {
+                map.values().any(|elem| value_matches(elem, op, needle))
+            }
+            serde_json::Value::Null => false,
         }
     }
-    Ok(())
+
+    let mut out = Vec::new();
+    'outer: for item in items {
+        let mut current = item;
+        for key in &keys {
+            match current {
+                serde_json::Value::Object(map) => {
+                    if let Some(next) = map.get(*key) {
+                        current = next;
+                    } else {
+                        continue 'outer;
+                    }
+                }
+                serde_json::Value::Array(arr) => {
+                    if arr.iter().any(|v| match v {
+                        serde_json::Value::Object(obj) => obj
+                            .get(*key)
+                            .map(|nested| value_matches(nested, op, needle))
+                            .unwrap_or(false),
+                        other => value_matches(other, op, needle),
+                    }) {
+                        // array satisfied via nested match
+                        out.push(item.clone());
+                        continue 'outer;
+                    }
+                    continue 'outer;
+                }
+                _ => continue 'outer,
+            }
+        }
+
+        if value_matches(current, op, needle) {
+            out.push(item.clone());
+        }
+    }
+
+    Ok(out)
+}
+
+fn write_query_output(items: &[serde_json::Value], format: QueryFormat) -> Result<(), String> {
+    match format {
+        QueryFormat::Ndjson => {
+            let stdout = io::stdout();
+            let handle = stdout.lock();
+            let mut writer = BufWriter::new(handle);
+            for item in items {
+                serde_json::to_writer(&mut writer, item).map_err(|e| e.to_string())?;
+                writer.write_all(b"\n").map_err(map_io)?;
+            }
+            writer.flush().map_err(map_io)?;
+            Ok(())
+        }
+        QueryFormat::Pretty => {
+            let mut buf = Vec::new();
+            let formatter = PrettyFormatter::with_indent(b"  ");
+            let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
+            let mut seq = Serializer::serialize_seq(&mut ser, Some(items.len()))
+                .map_err(|e| e.to_string())?;
+            for item in items {
+                SerializeSeq::serialize_element(&mut seq, item).map_err(|e| e.to_string())?;
+            }
+            SerializeSeq::end(seq).map_err(|e| e.to_string())?;
+            io::stdout().write_all(&buf).map_err(map_io)?;
+            io::stdout().write_all(b"\n").map_err(map_io)?;
+            Ok(())
+        }
+    }
 }
 
 fn cmd_add_note(args: AddNoteArgs) -> Result<(), String> {
@@ -1376,9 +1505,25 @@ struct AddNoteArgs {
     text: Option<String>,
 }
 
+#[derive(ValueEnum, Clone, Debug)]
+#[value(rename_all = "lowercase")]
+enum QueryFormat {
+    Ndjson,
+    Pretty,
+}
+
 #[derive(Args, Debug)]
 struct QueryArgs {
+    /// Optional filter expression, e.g., tags==backend or title~api
     filter: Option<String>,
+
+    #[arg(
+        long = "format",
+        value_enum,
+        default_value_t = QueryFormat::Ndjson,
+        help = "Output format: ndjson (default) or pretty JSON array"
+    )]
+    format: QueryFormat,
 }
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
