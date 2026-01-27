@@ -599,38 +599,79 @@ fn ticket_matches_filters(
 }
 
 fn cmd_ls(args: ListArgs) -> Result<(), String> {
-    let tickets = read_all_tickets().map_err(|e| e.to_string())?;
+    let mut tickets = read_all_tickets().map_err(|e| e.to_string())?;
     if tickets.is_empty() {
         return Ok(());
     }
 
-    let mut tickets = tickets;
-    tickets.sort_by(|a, b| a.id.cmp(&b.id));
+    tickets.sort_by(|a, b| {
+        a.priority_value()
+            .cmp(&b.priority_value())
+            .then_with(|| a.id.cmp(&b.id))
+    });
 
-    for ticket in &tickets {
-        if !ticket_matches_filters(
-            ticket,
-            args.status.as_ref().map(StatusValue::as_str),
-            args.assignee.as_deref(),
-            args.tags.first().map(|s| s.as_str()),
-        ) {
-            continue;
+    let filtered: Vec<&Ticket> = tickets
+        .iter()
+        .filter(|ticket| {
+            ticket_matches_filters(
+                ticket,
+                args.status.as_ref().map(StatusValue::as_str),
+                args.assignee.as_deref(),
+                args.tags.first().map(|s| s.as_str()),
+            )
+        })
+        .collect();
+
+    if args.json {
+        let rows: Vec<serde_json::Value> = filtered
+            .iter()
+            .map(|t| {
+                json!({
+                    "id": t.id,
+                    "status": t.status,
+                    "title": t.title,
+                    "deps": t.deps,
+                    "priority": t.priority.unwrap_or(2),
+                    "assignee": t.assignee,
+                    "tags": t.tags,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows).map_err(|e| e.to_string())?);
+        return Ok(());
+    }
+
+    let selected_columns = if args.columns.is_empty() {
+        vec!["id", "status", "title", "deps"]
+    } else {
+        args.columns.iter().map(|s| s.as_str()).collect()
+    };
+
+    for ticket in filtered {
+        let mut parts: Vec<String> = Vec::new();
+        for col in &selected_columns {
+            match *col {
+                "id" => parts.push(ticket.id.clone()),
+                "status" => parts.push(format!("[{}]", ticket.status)),
+                "title" => parts.push(ticket.title.clone()),
+                "deps" => parts.push(format!("[{}]", ticket.deps.join(", "))),
+                "priority" => parts.push(format!("P{}", ticket.priority.unwrap_or(2))),
+                "assignee" => {
+                    if let Some(a) = ticket.assignee() {
+                        parts.push(a.to_string());
+                    }
+                }
+                "tags" => {
+                    if !ticket.tags.is_empty() {
+                        parts.push(format!("[{}]", ticket.tags.join(", ")));
+                    }
+                }
+                other => {
+                    return Err(format!("Unknown column '{other}'"));
+                }
+            }
         }
-
-        let deps_display = if ticket.deps.is_empty() {
-            String::from("[]")
-        } else {
-            format!("[{}]", ticket.deps.join(", "))
-        };
-        let dep_suffix = if ticket.deps.is_empty() {
-            String::new()
-        } else {
-            format!(" <- {}", deps_display)
-        };
-        println!(
-            "{:<8} [{}] - {}{}",
-            ticket.id, ticket.status, ticket.title, dep_suffix
-        );
+        println!("{}", parts.join(" "));
     }
 
     Ok(())
@@ -1129,6 +1170,17 @@ struct ListArgs {
 
     #[arg(short = 'T', long = "tags", value_delimiter = ',')]
     tags: Vec<String>,
+
+    #[arg(
+        long = "columns",
+        value_delimiter = ',',
+        value_name = "FIELDS",
+        help = "Comma-separated columns to display (id,status,title,deps,priority,assignee,tags)"
+    )]
+    columns: Vec<String>,
+
+    #[arg(long = "json", default_value_t = false, help = "Output rows as JSON array")]
+    json: bool,
 }
 
 #[derive(Args, Debug)]

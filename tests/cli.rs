@@ -453,6 +453,60 @@ fn ls_filters_by_status_and_tag() {
 }
 
 #[test]
+fn ls_supports_columns_json_and_stable_ordering() {
+    let temp = TempDir::new().unwrap();
+
+    let low = {
+        let mut create = tk_cmd(&temp);
+        let out = create
+            .arg("create")
+            .arg("Low")
+            .arg("--priority")
+            .arg("3")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    let high = {
+        let mut create = tk_cmd(&temp);
+        let out = create
+            .arg("create")
+            .arg("High")
+            .arg("--priority")
+            .arg("1")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    // columns selection
+    tk_cmd(&temp)
+        .arg("ls")
+        .arg("--columns")
+        .arg("id,status,priority")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&high))
+        .stdout(predicate::str::contains("[open]"))
+        .stdout(predicate::str::contains("P1"));
+
+    // json output shape
+    let out = tk_cmd(&temp).arg("ls").arg("--json").output().unwrap();
+    assert!(out.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let arr = json.as_array().expect("array");
+    assert!(arr.iter().any(|v| v["id"] == high));
+    assert!(arr.iter().any(|v| v["id"] == low));
+
+    // stable ordering: high priority should appear before low
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let high_idx = stdout.find(&high).unwrap();
+    let low_idx = stdout.find(&low).unwrap();
+    assert!(high_idx < low_idx, "expected high before low: {stdout}");
+}
+
+#[test]
 fn ready_lists_when_dependencies_closed() {
     let temp = TempDir::new().unwrap();
 
