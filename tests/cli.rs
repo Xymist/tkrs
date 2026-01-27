@@ -348,6 +348,36 @@ fn dep_cycle_include_closed_flag() {
 }
 
 #[test]
+fn start_adds_note_and_is_idempotent() {
+    let temp = TempDir::new().unwrap();
+
+    let id = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("Start Me").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    tk_cmd(&temp)
+        .arg("start")
+        .arg(&id)
+        .arg("--note")
+        .arg("Beginning work")
+        .assert()
+        .success();
+
+    let path = temp.path().join(".tickets").join(format!("{id}.md"));
+    let contents = fs::read_to_string(&path).unwrap();
+    assert!(contents.contains("status: in_progress"));
+    assert!(contents.contains("## Notes"));
+    assert!(contents.contains("Beginning work"));
+
+    // Second start should not duplicate status
+    tk_cmd(&temp).arg("start").arg(&id).assert().success();
+    let contents_again = fs::read_to_string(&path).unwrap();
+    assert_eq!(contents_again.matches("status: in_progress").count(), 1);
+}
+
+#[test]
 fn ls_filters_by_status_and_tag() {
     let temp = TempDir::new().unwrap();
 

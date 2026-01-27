@@ -14,6 +14,15 @@ Key functions:
 - `cmd_*()` - Command handlers
 - `cmd_ready()`, `cmd_blocked()`, `cmd_ls()`
 
+## Workflow
+
+- Find the next open ticket, ordering alphabetically, in .tickets
+- Implement the changes suggested in the ticket
+- Add tests for the changes and run them with `cargo nextest run`
+- Document what was changed, appended to the ticket
+- Mark the ticket as closed
+- Use `jj` to commit with the message formatted as `<ticket-number>: <short-description>`
+
 ## Changelog
 
 When committing notable changes to the program (new commands, flags, bug fixes, behavior changes), update CHANGELOG.md in the same commit:

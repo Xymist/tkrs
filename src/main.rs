@@ -33,7 +33,7 @@ enum Command {
     #[command(about = "Create ticket, prints ID")]
     Create(CreateArgs),
     #[command(about = "Set status to in_progress")]
-    Start(IdArg),
+    Start(StartArgs),
     #[command(about = "Set status to closed")]
     Close(IdArg),
     #[command(about = "Set status to open")]
@@ -1281,9 +1281,30 @@ fn cmd_create(args: CreateArgs) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_set_status(id: String, status: StatusValue) -> Result<(), String> {
-    let path = resolve_ticket_path(&id)?;
+fn set_status_with_note(
+    id: &str,
+    status: StatusValue,
+    note: Option<&str>,
+    append_timestamp: bool,
+) -> Result<(), String> {
+    let path = resolve_ticket_path(id)?;
     let contents = fs::read_to_string(&path).map_err(|e| format!("failed to read ticket: {e}"))?;
+
+    // Avoid rewriting if status already matches and no note requested
+    let mut current_status = None;
+    for line in contents.lines() {
+        if let Some(rest) = line.strip_prefix("status:") {
+            current_status = Some(rest.trim().to_string());
+        }
+        if line.trim() == "---" && current_status.is_some() {
+            break;
+        }
+    }
+
+    let status_str = status.as_str();
+    if current_status.as_deref() == Some(status_str) && note.is_none() && !append_timestamp {
+        return Ok(());
+    }
 
     let mut lines = contents.lines();
     let mut output = String::new();
@@ -1296,10 +1317,9 @@ fn cmd_set_status(id: String, status: StatusValue) -> Result<(), String> {
                 in_frontmatter = true;
             } else {
                 if !status_written {
-                    output.push_str(&format!("status: {}\n", status.as_str()));
+                    output.push_str(&format!("status: {}\n", status_str));
                 }
                 output.push_str("---\n");
-                // write remaining lines and break
                 for rest in lines {
                     output.push_str(rest);
                     output.push('\n');
@@ -1311,7 +1331,7 @@ fn cmd_set_status(id: String, status: StatusValue) -> Result<(), String> {
         }
 
         if in_frontmatter && line.starts_with("status:") {
-            output.push_str(&format!("status: {}\n", status.as_str()));
+            output.push_str(&format!("status: {}\n", status_str));
             status_written = true;
         } else {
             output.push_str(line);
@@ -1323,7 +1343,36 @@ fn cmd_set_status(id: String, status: StatusValue) -> Result<(), String> {
         return Err("ticket missing frontmatter".to_string());
     }
 
-    fs::write(&path, output).map_err(|e| format!("failed to write ticket: {e}"))?;
+    fs::write(&path, &output).map_err(|e| format!("failed to write ticket: {e}"))?;
+
+    if note.is_some() || append_timestamp {
+        let mut combined = String::new();
+        if append_timestamp {
+            let timestamp = OffsetDateTime::now_utc()
+                .format(&Rfc3339)
+                .map_err(|e| e.to_string())?;
+            combined.push_str(&timestamp);
+        }
+        if let Some(n) = note {
+            if !combined.is_empty() {
+                combined.push_str(": ");
+            }
+            combined.push_str(n.trim());
+        }
+        if !combined.is_empty() {
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .map_err(|e| format!("failed to open ticket: {e}"))?;
+
+            let existing = fs::read_to_string(&path).map_err(|e| format!("failed to read ticket: {e}"))?;
+            if !existing.contains("## Notes") {
+                writeln!(file, "\n## Notes").map_err(map_io)?;
+            }
+            writeln!(file, "\n{}", combined).map_err(map_io)?;
+        }
+    }
+
     Ok(())
 }
 
@@ -1647,15 +1696,19 @@ fn main() {
     match cli.command {
         Command::Create(args) => cmd_create(args).unwrap_or_else(report_err),
         Command::Start(args) => {
-            cmd_set_status(args.id, StatusValue::InProgress).unwrap_or_else(report_err)
+            cmd_start(args).unwrap_or_else(report_err)
         }
         Command::Close(args) => {
-            cmd_set_status(args.id, StatusValue::Closed).unwrap_or_else(report_err)
+            set_status_with_note(&args.id, StatusValue::Closed, None, false)
+                .unwrap_or_else(report_err)
         }
         Command::Reopen(args) => {
-            cmd_set_status(args.id, StatusValue::Open).unwrap_or_else(report_err)
+            set_status_with_note(&args.id, StatusValue::Open, None, false)
+                .unwrap_or_else(report_err)
         }
-        Command::Status(args) => cmd_set_status(args.id, args.status).unwrap_or_else(report_err),
+        Command::Status(args) => {
+            set_status_with_note(&args.id, args.status, None, false).unwrap_or_else(report_err)
+        }
         Command::Dep(args) => cmd_dep(args).unwrap_or_else(report_err),
         Command::Undep(args) => cmd_undep(args).unwrap_or_else(report_err),
         Command::Link(args) => cmd_link(args).unwrap_or_else(report_err),
@@ -1675,4 +1728,20 @@ fn main() {
 fn report_err(err: impl std::fmt::Display) {
     eprintln!("{err}");
     exit(1);
+}
+#[derive(Args, Debug)]
+struct StartArgs {
+    id: String,
+
+    #[arg(long = "note", alias = "message", help = "Optional note to record when starting")]
+    note: Option<String>,
+}
+
+fn cmd_start(args: StartArgs) -> Result<(), String> {
+    set_status_with_note(
+        &args.id,
+        StatusValue::InProgress,
+        args.note.as_deref(),
+        args.note.is_some(),
+    )
 }
