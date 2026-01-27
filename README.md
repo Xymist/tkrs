@@ -64,6 +64,10 @@ Claude Opus picks it up naturally from there. Other models may need additional g
 - `tk query [FILTER]` — output tickets as JSON; supports `--format ndjson|pretty` and built-in filters (`field==value` exact match, `field~substr` contains)
 - `tk migrate-beads` — import beads issues from `.beads/issues.jsonl`
 
+## Release workflow
+
+Pushing a tag matching `vX.Y.Z` triggers the GitHub Actions workflow `.github/workflows/release.yml` to build the Rust binary in release mode and publish a versioned tarball (`ticket-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`) as a GitHub release asset.
+
 ## License
 
 MIT
