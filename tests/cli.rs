@@ -606,6 +606,91 @@ fn blocked_lists_when_dependencies_open() {
 }
 
 #[test]
+fn blocked_only_open_and_missing_dep_handling() {
+    let temp = TempDir::new().unwrap();
+
+    // Ticket with open and in-progress blockers
+    let open_dep = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("Open Dep").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let in_progress_dep = {
+        let mut create = tk_cmd(&temp);
+        let out = create
+            .arg("create")
+            .arg("In Progress Dep")
+            .output()
+            .unwrap();
+        let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        tk_cmd(&temp).arg("start").arg(&id).assert().success();
+        id
+    };
+
+    let root = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("Root").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    // Add deps: open and in-progress via CLI, then inject a missing dep directly
+    tk_cmd(&temp)
+        .arg("dep")
+        .arg(&root)
+        .arg(&open_dep)
+        .assert()
+        .success();
+    tk_cmd(&temp)
+        .arg("dep")
+        .arg(&root)
+        .arg(&in_progress_dep)
+        .assert()
+        .success();
+
+    let root_path = temp.path().join(".tickets").join(format!("{root}.md"));
+    let contents = fs::read_to_string(&root_path).unwrap();
+    let mut deps = vec![
+        open_dep.clone(),
+        in_progress_dep.clone(),
+        "missing-one".to_string(),
+    ];
+    deps.sort();
+    let new_contents = contents
+        .lines()
+        .map(|line| {
+            if line.starts_with("deps:") {
+                format!("deps: [{}]", deps.join(", "))
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&root_path, new_contents).unwrap();
+
+    // Default blocked shows open + in-progress + missing
+    tk_cmd(&temp)
+        .arg("blocked")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&root))
+        .stdout(predicate::str::contains(&open_dep))
+        .stdout(predicate::str::contains(&in_progress_dep))
+        .stdout(predicate::str::contains("missing-one"));
+
+    // only-open filters out in-progress blockers but keeps missing
+    tk_cmd(&temp)
+        .arg("blocked")
+        .arg("--only-open")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&root))
+        .stdout(predicate::str::contains(&open_dep))
+        .stdout(predicate::str::contains(&in_progress_dep).not())
+        .stdout(predicate::str::contains("missing-one"));
+}
+
+#[test]
 fn closed_lists_recent_closed_with_filters() {
     let temp = TempDir::new().unwrap();
 

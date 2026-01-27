@@ -53,7 +53,7 @@ enum Command {
     #[command(about = "List open/in-progress tickets with deps resolved")]
     Ready(FilterArgs),
     #[command(about = "List open/in-progress tickets with unresolved deps")]
-    Blocked(FilterArgs),
+    Blocked(BlockedArgs),
     #[command(about = "List recently closed tickets")]
     Closed(ClosedArgs),
     #[command(about = "Display ticket")]
@@ -779,7 +779,7 @@ fn cmd_ready(args: FilterArgs) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_blocked(args: FilterArgs) -> Result<(), String> {
+fn cmd_blocked(args: BlockedArgs) -> Result<(), String> {
     let tickets = read_all_tickets().map_err(|e| e.to_string())?;
     if tickets.is_empty() {
         return Ok(());
@@ -805,7 +805,9 @@ fn cmd_blocked(args: FilterArgs) -> Result<(), String> {
         for dep in &ticket.deps {
             if let Some(t) = lookup.get(dep) {
                 if t.status != "closed" {
-                    blockers.push(dep.clone());
+                    if !args.only_open || t.status == "open" {
+                        blockers.push(dep.clone());
+                    }
                 }
             } else {
                 blockers.push(dep.clone());
@@ -813,6 +815,7 @@ fn cmd_blocked(args: FilterArgs) -> Result<(), String> {
         }
 
         if !blockers.is_empty() {
+            blockers.sort();
             blocked.push((ticket, blockers));
         }
     }
@@ -1239,6 +1242,22 @@ struct FilterArgs {
 
     #[arg(short = 'T', long = "tags", value_delimiter = ',')]
     tags: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+struct BlockedArgs {
+    #[arg(short = 'a', long = "assignee")]
+    assignee: Option<String>,
+
+    #[arg(short = 'T', long = "tags", value_delimiter = ',')]
+    tags: Vec<String>,
+
+    #[arg(
+        long = "only-open",
+        default_value_t = false,
+        help = "Show only blockers that are open"
+    )]
+    only_open: bool,
 }
 
 #[derive(Args, Debug)]
