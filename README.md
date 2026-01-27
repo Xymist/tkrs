@@ -16,14 +16,14 @@ VS Code allows you to Ctrl+Click or Cmd+Click the ID and jump directly to the fi
 
 ## Install
 
-**From source (auto-updates on git pull):**
+**From source:**
 
 ```bash
 git clone https://github.com/xymist/tkrs.git
-cd tkrs && cargo build --release && ln -s "$PWD/target/release/tkrs" ~/.local/bin/tk
+cd tkrs && cargo build --release && ln -s "$PWD/target/release/tk" ~/.local/bin/tk
 ```
 
-**Or** just copy `ticket` to somewhere in your PATH.
+**Or** just copy `target/release/tk` to somewhere in your PATH.
 
 ## Requirements
 
@@ -53,7 +53,7 @@ Claude Opus picks it up naturally from there. Other models may need additional g
 
 ## Release workflow
 
-Pushing a tag matching `vX.Y.Z` triggers the GitHub Actions workflow `.github/workflows/release.yml` to build the Rust binary in release mode and publish a versioned tarball (`tk-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`) as a GitHub release asset. The workflow can also be run manually (`workflow_dispatch`) by providing the tag to build.
+Pushing a tag matching `vX.Y.Z` triggers the GitHub Actions workflow `.github/workflows/release.yml` to build the Rust binary in release mode and publish a versioned tarball (`tk-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`) as a GitHub release asset. The workflow can also be run manually (`workflow_dispatch`) by providing the tag to build; release creation/uploads now use the GitHub CLI to avoid deprecated `set-output` paths.
 
 ## License
 

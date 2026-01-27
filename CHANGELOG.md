@@ -28,6 +28,7 @@
 - t-eb47: `dep tree` adds status/only-open filters and uses cached graph with stable sorting (2026-01-27)
 - t-f431: `reopen` uses shared status helper, clears closed_at, and supports optional notes (2026-01-27)
 - tic-2797: GitHub Actions release workflow builds and publishes tagged binaries, packaging `tk` tarballs (2026-01-27)
+- tic-9094: Release workflow switches to `gh release` and `$GITHUB_OUTPUT` (2026-01-27)
 
 ### Changed
 

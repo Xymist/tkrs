@@ -46,23 +46,14 @@ jobs:
           echo "artifact_path=dist/${ARTIFACT}" >> "$GITHUB_OUTPUT"
           echo "artifact_name=${ARTIFACT}" >> "$GITHUB_OUTPUT"
 
-      - name: Create GitHub release
-        id: create_release
-        uses: actions/create-release@v1
+      - name: Publish release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ env.TAG }}
-          release_name: ${{ env.TAG }}
-          draft: false
-          prerelease: false
-
-      - name: Upload release asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ${{ steps.package.outputs.artifact_path }}
-          asset_name: ${{ steps.package.outputs.artifact_name }}
-          asset_content_type: application/gzip
+        run: |
+          set -euo pipefail
+          ARTIFACT_PATH="${{ steps.package.outputs.artifact_path }}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ARTIFACT_PATH" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" "$ARTIFACT_PATH" --title "$TAG" --notes "" --latest --repo "$GITHUB_REPOSITORY"
+          fi
