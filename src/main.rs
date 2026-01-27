@@ -324,6 +324,18 @@ fn write_ticket_deps(path: &Path, deps: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn compute_updated_deps(
+    ticket: &Ticket,
+    mut mutator: impl FnMut(&mut Vec<String>) -> bool,
+) -> (bool, Vec<String>) {
+    let mut deps = ticket.deps.clone();
+    let changed = mutator(&mut deps);
+    deps.sort();
+    deps.dedup();
+    let changed = changed && deps != ticket.deps;
+    (changed, deps)
+}
+
 fn resolve_dep_paths(id: &str, dep_id: &str) -> Result<(PathBuf, (String, PathBuf)), String> {
     let tickets = read_all_tickets().map_err(|e| e.to_string())?;
     if tickets.is_empty() {
@@ -648,22 +660,22 @@ fn cmd_undep(args: DepEdgeArgs) -> Result<(), String> {
     let dep_id = resolve_partial_id(&tickets, &args.dep_id)?;
 
     let path = resolve_ticket_path(&ticket_id)?;
-    let mut ticket = read_ticket(&path)
+    let ticket = read_ticket(&path)
         .map_err(|e| format!("failed to read ticket: {e}"))?
         .ok_or_else(|| "ticket missing id".to_string())?;
 
-    let before = ticket.deps.len();
-    ticket.deps.retain(|d| d != &dep_id);
-    if before == ticket.deps.len() {
-        return Err(format!(
-            "Error: dependency '{dep_id}' not found on '{ticket_id}'"
-        ));
-    }
+    let (changed, deps) = compute_updated_deps(&ticket, |deps| {
+        let before = deps.len();
+        deps.retain(|d| d != &dep_id);
+        before != deps.len()
+    });
 
-    ticket.deps.sort();
-    ticket.deps.dedup();
-    write_ticket_deps(&ticket.path, &ticket.deps)?;
-    println!("Removed dependency: {} !-> {}", ticket.id, dep_id);
+    if changed {
+        write_ticket_deps(&ticket.path, &deps)?;
+        println!("Removed dependency: {} !-> {}", ticket.id, dep_id);
+    } else {
+        println!("Dependency already removed: {} !-> {}", ticket.id, dep_id);
+    }
     Ok(())
 }
 

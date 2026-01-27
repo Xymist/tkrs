@@ -1,4 +1,4 @@
-use assert_cmd::{cargo::cargo_bin_cmd, Command};
+use assert_cmd::{Command, cargo::cargo_bin_cmd};
 use assert_fs::TempDir;
 use predicates::prelude::*;
 use std::fs;
@@ -1414,10 +1414,12 @@ fn show_json_includes_resolved_titles_and_body() {
     assert_eq!(json["deps"][0]["title"], "Parent Ticket");
     assert_eq!(json["links"][0]["title"], "Parent Ticket");
     assert_eq!(json["tags"], serde_json::json!(["feat", "backend"]));
-    assert!(json["body"]["raw"]
-        .as_str()
-        .unwrap()
-        .contains("# Child Ticket"));
+    assert!(
+        json["body"]["raw"]
+            .as_str()
+            .unwrap()
+            .contains("# Child Ticket")
+    );
     assert_eq!(json["body"]["design"], "Design text");
     assert_eq!(json["body"]["acceptance"], "Do the thing");
     assert_eq!(json["body"]["notes"], "Note here");
@@ -1829,6 +1831,59 @@ fn undep_resolves_partials_and_errors_when_missing() {
     let alps_path = temp.path().join(".tickets").join(format!("{alps}.md"));
     let alps_contents = fs::read_to_string(alps_path).unwrap();
     assert!(alps_contents.contains("deps: []"));
+}
+
+#[test]
+fn undep_is_idempotent_and_normalizes_empty() {
+    let temp = TempDir::new().unwrap();
+
+    let dep = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("Dep").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    let ticket = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("Root").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    tk_cmd(&temp)
+        .arg("dep")
+        .arg(&ticket)
+        .arg(&dep)
+        .assert()
+        .success();
+
+    // first removal succeeds
+    tk_cmd(&temp)
+        .arg("undep")
+        .arg(&ticket)
+        .arg(&dep)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Removed dependency"));
+
+    // second removal is idempotent and reports already removed
+    tk_cmd(&temp)
+        .arg("undep")
+        .arg(&ticket)
+        .arg(&dep)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Dependency already removed"));
+
+    // deps normalized to []
+    let path = tk_cmd(&temp)
+        .arg("edit")
+        .arg(&ticket)
+        .arg("--print")
+        .output()
+        .unwrap();
+    let ticket_path = String::from_utf8_lossy(&path.stdout).trim().to_string();
+    let contents = std::fs::read_to_string(ticket_path).unwrap();
+    assert!(contents.contains("deps: []"));
 }
 
 #[test]
