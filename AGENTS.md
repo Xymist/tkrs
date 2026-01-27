@@ -2,17 +2,9 @@
 
 This file provides guidance to LLMs when working with code in this repository.
 
-See @README.md for usage documentation. Run `tk help` for command reference. Always update the README.md usage content when adding/changing commands and flags.
+See @README.md for usage documentation. Run `cargo run -- help` for command reference.
 
-## Architecture
-
-Key functions:
-
-- `generate_id()` - Creates IDs from directory name prefix + timestamp hash
-- `ticket_path()` - Resolves partial IDs to full file paths
-- `yaml_field()` / `update_yaml_field()` - YAML frontmatter manipulation
-- `cmd_*()` - Command handlers
-- `cmd_ready()`, `cmd_blocked()`, `cmd_ls()`
+Always update the README.md usage content when adding/changing commands and flags.
 
 ## Workflow
 
@@ -47,8 +39,3 @@ jj commit -m "release: v0.3.0"
 git tag v0.3.0
 jj git push && git push origin v0.3.0
 ```
-
-## Testing
-
-- Always add tests if making changes to observable behaviour. Exercise all visible features.
-- Test with `cargo nextest run`
