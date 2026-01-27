@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{exit, Command as OsCommand};
+use std::process::{Command as OsCommand, exit};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
@@ -148,7 +148,11 @@ struct IdArg {
 struct CloseArgs {
     id: String,
 
-    #[arg(long = "note", alias = "message", help = "Optional note to record when closing")]
+    #[arg(
+        long = "note",
+        alias = "message",
+        help = "Optional note to record when closing"
+    )]
     note: Option<String>,
 }
 
@@ -174,7 +178,11 @@ struct DepArgs {
 
 #[derive(Args, Debug)]
 struct DepCycleArgs {
-    #[arg(long = "include-closed", default_value_t = false, help = "Include closed tickets when detecting cycles")]
+    #[arg(
+        long = "include-closed",
+        default_value_t = false,
+        help = "Include closed tickets when detecting cycles"
+    )]
     include_closed: bool,
 }
 
@@ -325,7 +333,9 @@ fn resolve_partial_id(tickets: &[Ticket], needle: &str) -> Result<String, String
     }
 }
 
-fn read_ticket_graph(include_closed: bool) -> Result<(Vec<Ticket>, HashMap<String, Vec<String>>), String> {
+fn read_ticket_graph(
+    include_closed: bool,
+) -> Result<(Vec<Ticket>, HashMap<String, Vec<String>>), String> {
     let tickets = read_all_tickets().map_err(|e| e.to_string())?;
     if tickets.is_empty() {
         return Ok((tickets, HashMap::new()));
@@ -482,7 +492,14 @@ fn dep_cycle(args: DepCycleArgs) -> Result<(), String> {
         if state.get(node) == Some(&2) {
             continue;
         }
-        dfs(node, &graph, &mut state, &mut Vec::new(), &mut cycles, &mut seen);
+        dfs(
+            node,
+            &graph,
+            &mut state,
+            &mut Vec::new(),
+            &mut cycles,
+            &mut seen,
+        );
     }
 
     if cycles.is_empty() {
@@ -679,7 +696,10 @@ fn cmd_ls(args: ListArgs) -> Result<(), String> {
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&rows).map_err(|e| e.to_string())?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&rows).map_err(|e| e.to_string())?
+        );
         return Ok(());
     }
 
@@ -992,9 +1012,7 @@ fn cmd_migrate_beads() -> Result<(), String> {
         let status = issue.status.as_deref().map(str::trim).unwrap_or("");
 
         if id.is_empty() || title.is_empty() || status.is_empty() {
-            eprintln!(
-                "Warning: skipping beads record at line {line_no}: missing id/title/status"
-            );
+            eprintln!("Warning: skipping beads record at line {line_no}: missing id/title/status");
             skipped += 1;
             continue;
         }
@@ -1231,7 +1249,11 @@ struct ListArgs {
     )]
     columns: Vec<String>,
 
-    #[arg(long = "json", default_value_t = false, help = "Output rows as JSON array")]
+    #[arg(
+        long = "json",
+        default_value_t = false,
+        help = "Output rows as JSON array"
+    )]
     json: bool,
 }
 
@@ -1541,7 +1563,8 @@ fn set_status_with_note(
                 .open(&path)
                 .map_err(|e| format!("failed to open ticket: {e}"))?;
 
-            let existing = fs::read_to_string(&path).map_err(|e| format!("failed to read ticket: {e}"))?;
+            let existing =
+                fs::read_to_string(&path).map_err(|e| format!("failed to read ticket: {e}"))?;
             if !existing.contains("## Notes") {
                 writeln!(file, "\n## Notes").map_err(map_io)?;
             }
@@ -1664,7 +1687,6 @@ impl Ticket {
 
 fn read_ticket(path: &Path) -> io::Result<Option<Ticket>> {
     let content = fs::read_to_string(path)?;
-    let lines = content.lines();
     let mut in_frontmatter = false;
     let mut id = String::new();
     let mut status = String::new();
@@ -1682,15 +1704,34 @@ fn read_ticket(path: &Path) -> io::Result<Option<Ticket>> {
     let mut notes: Option<String> = None;
     let mut title = String::new();
 
-    for line in lines {
+    #[derive(Clone, Copy)]
+    enum Section {
+        Description,
+        Design,
+        Acceptance,
+        Notes,
+    }
+
+    let mut section = Section::Description;
+    let mut desc_buf = String::new();
+    let mut design_buf = String::new();
+    let mut acceptance_buf = String::new();
+    let mut notes_buf = String::new();
+    let mut in_body = false;
+
+    for line in content.lines() {
         if line.trim() == "---" {
             if !in_frontmatter {
                 in_frontmatter = true;
                 continue;
             } else {
-                break;
+                in_frontmatter = false;
+                in_body = true;
+                section = Section::Description;
+                continue;
             }
         }
+
         if in_frontmatter {
             if let Some(rest) = line.strip_prefix("id:") {
                 id = rest.trim().to_string();
@@ -1725,59 +1766,58 @@ fn read_ticket(path: &Path) -> io::Result<Option<Ticket>> {
                     external_ref = Some(trimmed.to_string());
                 }
             }
-        } else if title.is_empty()
-            && let Some(rest) = line.strip_prefix("# ")
-        {
-            title = rest.to_string();
-        } else if line.starts_with("## Design") {
-            design = Some(String::new());
-        } else if line.starts_with("## Acceptance Criteria") {
-            acceptance = Some(String::new());
-        } else if line.starts_with("## Notes") {
-            notes = Some(String::new());
-        } else if design.is_some() && notes.is_none() && !line.starts_with("## ") {
-            design = Some(match design.take() {
-                Some(mut s) => {
-                    s.push_str(line);
-                    s.push('\n');
-                    s
-                }
-                None => String::new(),
-            });
-        } else if acceptance.is_some() && notes.is_none() && !line.starts_with("## ") {
-            acceptance = Some(match acceptance.take() {
-                Some(mut s) => {
-                    s.push_str(line);
-                    s.push('\n');
-                    s
-                }
-                None => String::new(),
-            });
-        } else if notes.is_some() && !line.starts_with("## ") {
-            notes = Some(match notes.take() {
-                Some(mut s) => {
-                    s.push_str(line);
-                    s.push('\n');
-                    s
-                }
-                None => String::new(),
-            });
-        } else if notes.is_none() && acceptance.is_none() && design.is_none() && !line.is_empty() {
-            // First body section before any headings -> description
-            description = Some(match description.take() {
-                Some(mut s) => {
-                    s.push_str(line);
-                    s.push('\n');
-                    s
-                }
-                None => {
-                    let mut s = String::new();
-                    s.push_str(line);
-                    s.push('\n');
-                    s
-                }
-            });
+            continue;
         }
+
+        if !in_body {
+            continue;
+        }
+
+        if title.is_empty() {
+            if let Some(rest) = line.strip_prefix("# ") {
+                title = rest.to_string();
+                continue;
+            }
+        }
+
+        if line.starts_with("## Design") {
+            section = Section::Design;
+            continue;
+        } else if line.starts_with("## Acceptance Criteria") {
+            section = Section::Acceptance;
+            continue;
+        } else if line.starts_with("## Notes") {
+            section = Section::Notes;
+            continue;
+        }
+
+        if line.is_empty() {
+            continue;
+        }
+
+        let target = match section {
+            Section::Description => &mut desc_buf,
+            Section::Design => &mut design_buf,
+            Section::Acceptance => &mut acceptance_buf,
+            Section::Notes => &mut notes_buf,
+        };
+        if !target.is_empty() {
+            target.push('\n');
+        }
+        target.push_str(line);
+    }
+
+    if !desc_buf.is_empty() {
+        description = Some(desc_buf);
+    }
+    if !design_buf.is_empty() {
+        design = Some(design_buf);
+    }
+    if !acceptance_buf.is_empty() {
+        acceptance = Some(acceptance_buf);
+    }
+    if !notes_buf.is_empty() {
+        notes = Some(notes_buf);
     }
 
     if id.is_empty() {
@@ -1871,17 +1911,13 @@ fn main() {
 
     match cli.command {
         Command::Create(args) => cmd_create(args).unwrap_or_else(report_err),
-        Command::Start(args) => {
-            cmd_start(args).unwrap_or_else(report_err)
-        }
+        Command::Start(args) => cmd_start(args).unwrap_or_else(report_err),
         Command::Close(args) => {
             set_status_with_note(&args.id, StatusValue::Closed, args.note.as_deref(), true)
                 .unwrap_or_else(report_err)
         }
-        Command::Reopen(args) => {
-            set_status_with_note(&args.id, StatusValue::Open, None, false)
-                .unwrap_or_else(report_err)
-        }
+        Command::Reopen(args) => set_status_with_note(&args.id, StatusValue::Open, None, false)
+            .unwrap_or_else(report_err),
         Command::Status(args) => {
             set_status_with_note(&args.id, args.status, None, false).unwrap_or_else(report_err)
         }
@@ -1905,11 +1941,71 @@ fn report_err(err: impl std::fmt::Display) {
     eprintln!("{err}");
     exit(1);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write as IoWrite;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn tmp_ticket_path(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        path.push(format!("{name}-{ts}.md"));
+        path
+    }
+
+    #[test]
+    fn read_ticket_parses_sections() {
+        let path = tmp_ticket_path("ticket-sections");
+        let mut file = File::create(&path).unwrap();
+        writeln!(
+            file,
+            "---\nid: demo-1\nstatus: open\ndeps: []\nlinks: []\npriority: 2\n---\n# Demo Title\n\nFirst paragraph.\n\n## Design\n\nDesign text line\n\n## Acceptance Criteria\n\nMust pass tests\n\n## Notes\n\nNote line\n"
+        )
+        .unwrap();
+
+        let ticket = read_ticket(&path).unwrap().expect("ticket present");
+        assert_eq!(ticket.id, "demo-1");
+        assert_eq!(ticket.title, "Demo Title");
+        assert!(
+            ticket
+                .design
+                .as_deref()
+                .map(|d| d.contains("Design text line"))
+                .unwrap_or(false)
+        );
+        assert!(
+            ticket
+                .acceptance
+                .as_deref()
+                .map(|a| a.contains("Must pass tests"))
+                .unwrap_or(false)
+        );
+        assert!(
+            ticket
+                .notes
+                .as_deref()
+                .map(|n| n.contains("Note line"))
+                .unwrap_or(false)
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+}
 #[derive(Args, Debug)]
 struct StartArgs {
     id: String,
 
-    #[arg(long = "note", alias = "message", help = "Optional note to record when starting")]
+    #[arg(
+        long = "note",
+        alias = "message",
+        help = "Optional note to record when starting"
+    )]
     note: Option<String>,
 }
 

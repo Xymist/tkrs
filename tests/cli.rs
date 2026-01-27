@@ -552,7 +552,45 @@ fn ready_lists_when_dependencies_closed() {
         .assert()
         .success()
         .stdout(predicate::str::contains(&ready_id))
+        .stdout(predicate::str::contains("Ready Root"))
         .stdout(predicate::str::contains(&blocked_id).not());
+}
+
+#[test]
+fn ready_includes_titles() {
+    let temp = TempDir::new().unwrap();
+
+    let dep_closed = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("Dependency").output().unwrap();
+        let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        tk_cmd(&temp).arg("close").arg(&id).assert().success();
+        id
+    };
+
+    let ready_id = {
+        let mut create = tk_cmd(&temp);
+        let out = create
+            .arg("create")
+            .arg("Ready With Title")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    tk_cmd(&temp)
+        .arg("dep")
+        .arg(&ready_id)
+        .arg(&dep_closed)
+        .assert()
+        .success();
+
+    tk_cmd(&temp)
+        .arg("ready")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&ready_id))
+        .stdout(predicate::str::contains("Ready With Title"));
 }
 
 #[test]
