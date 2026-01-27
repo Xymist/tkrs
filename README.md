@@ -55,7 +55,7 @@ Claude Opus picks it up naturally from there. Other models may need additional g
 ## Commands
 
 - `tk create` — create a ticket with optional fields
-- `tk start|close|reopen|status` — set ticket status
+- `tk start|close|reopen|status` — set ticket status (close records `closed_at` and optional note)
 - `tk dep|undep|link|unlink` — manage dependencies and links (use `tk dep cycle --include-closed` to scan closed tickets too)
 - `tk ls` — list tickets with filters
 - `tk ready|blocked` — show open/in-progress tickets by dependency readiness

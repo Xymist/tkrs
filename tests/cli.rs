@@ -147,6 +147,39 @@ fn close_sets_status_closed() {
 }
 
 #[test]
+fn close_sets_closed_at_and_appends_note_once() {
+    let temp = TempDir::new().unwrap();
+
+    let id = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("Close Me").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    // First close with note
+    tk_cmd(&temp)
+        .arg("close")
+        .arg(&id)
+        .arg("--note")
+        .arg("done")
+        .assert()
+        .success();
+
+    let path = temp.path().join(".tickets").join(format!("{id}.md"));
+    let contents = fs::read_to_string(&path).unwrap();
+    assert!(contents.contains("status: closed"));
+    assert!(contents.contains("closed_at:"));
+    assert!(contents.contains("## Notes"));
+    assert!(contents.contains("done"));
+
+    // Second close without note should be idempotent (no duplicate status or closed_at)
+    tk_cmd(&temp).arg("close").arg(&id).assert().success();
+    let again = fs::read_to_string(&path).unwrap();
+    assert_eq!(again.matches("status: closed").count(), 1);
+    assert_eq!(again.matches("closed_at:").count(), 1);
+}
+
+#[test]
 fn reopen_sets_status_open() {
     let temp = TempDir::new().unwrap();
     let mut create = tk_cmd(&temp);

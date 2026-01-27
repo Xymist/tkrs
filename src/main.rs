@@ -35,7 +35,7 @@ enum Command {
     #[command(about = "Set status to in_progress")]
     Start(StartArgs),
     #[command(about = "Set status to closed")]
-    Close(IdArg),
+    Close(CloseArgs),
     #[command(about = "Set status to open")]
     Reopen(IdArg),
     #[command(about = "Update status (open|in_progress|closed)")]
@@ -142,6 +142,14 @@ struct CreateArgs {
 #[derive(Args, Debug)]
 struct IdArg {
     id: String,
+}
+
+#[derive(Args, Debug)]
+struct CloseArgs {
+    id: String,
+
+    #[arg(long = "note", alias = "message", help = "Optional note to record when closing")]
+    note: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -1162,7 +1170,7 @@ struct QueryArgs {
     filter: Option<String>,
 }
 
-#[derive(ValueEnum, Clone, Debug)]
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[value(rename_all = "snake_case")]
 enum StatusValue {
     Open,
@@ -1319,26 +1327,20 @@ fn set_status_with_note(
     let path = resolve_ticket_path(id)?;
     let contents = fs::read_to_string(&path).map_err(|e| format!("failed to read ticket: {e}"))?;
 
-    // Avoid rewriting if status already matches and no note requested
-    let mut current_status = None;
-    for line in contents.lines() {
-        if let Some(rest) = line.strip_prefix("status:") {
-            current_status = Some(rest.trim().to_string());
-        }
-        if line.trim() == "---" && current_status.is_some() {
-            break;
-        }
-    }
-
     let status_str = status.as_str();
-    if current_status.as_deref() == Some(status_str) && note.is_none() && !append_timestamp {
-        return Ok(());
+
+    #[derive(Default)]
+    struct Frontmatter<'a> {
+        status: Option<&'a str>,
+        closed_at: Option<&'a str>,
     }
 
-    let mut lines = contents.lines();
+    let mut fm = Frontmatter::default();
     let mut output = String::new();
+    let mut lines = contents.lines();
     let mut in_frontmatter = false;
     let mut status_written = false;
+    let mut closed_written = false;
 
     while let Some(line) = lines.next() {
         if line.trim() == "---" {
@@ -1347,6 +1349,12 @@ fn set_status_with_note(
             } else {
                 if !status_written {
                     output.push_str(&format!("status: {}\n", status_str));
+                }
+                if status == StatusValue::Closed && !closed_written {
+                    let ts = OffsetDateTime::now_utc()
+                        .format(&Rfc3339)
+                        .map_err(|e| e.to_string())?;
+                    output.push_str(&format!("closed_at: {}\n", ts));
                 }
                 output.push_str("---\n");
                 for rest in lines {
@@ -1359,9 +1367,24 @@ fn set_status_with_note(
             continue;
         }
 
-        if in_frontmatter && line.starts_with("status:") {
-            output.push_str(&format!("status: {}\n", status_str));
-            status_written = true;
+        if in_frontmatter {
+            if let Some(rest) = line.strip_prefix("status:") {
+                fm.status = Some(rest.trim());
+                output.push_str(&format!("status: {}\n", status_str));
+                status_written = true;
+            } else if let Some(rest) = line.strip_prefix("closed_at:") {
+                fm.closed_at = Some(rest.trim());
+                if status == StatusValue::Closed {
+                    let ts = OffsetDateTime::now_utc()
+                        .format(&Rfc3339)
+                        .map_err(|e| e.to_string())?;
+                    output.push_str(&format!("closed_at: {}\n", ts));
+                }
+                closed_written = true;
+            } else {
+                output.push_str(line);
+                output.push('\n');
+            }
         } else {
             output.push_str(line);
             output.push('\n');
@@ -1370,6 +1393,10 @@ fn set_status_with_note(
 
     if !in_frontmatter {
         return Err("ticket missing frontmatter".to_string());
+    }
+
+    if status_str == fm.status.unwrap_or("") && note.is_none() && !append_timestamp {
+        return Ok(());
     }
 
     fs::write(&path, &output).map_err(|e| format!("failed to write ticket: {e}"))?;
@@ -1728,7 +1755,7 @@ fn main() {
             cmd_start(args).unwrap_or_else(report_err)
         }
         Command::Close(args) => {
-            set_status_with_note(&args.id, StatusValue::Closed, None, false)
+            set_status_with_note(&args.id, StatusValue::Closed, args.note.as_deref(), true)
                 .unwrap_or_else(report_err)
         }
         Command::Reopen(args) => {
