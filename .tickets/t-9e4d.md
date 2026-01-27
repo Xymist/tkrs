@@ -1,12 +1,13 @@
 ---
 id: t-9e4d
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-01-27T21:32:14.643479636Z
 type: task
 priority: 2
 assignee: Xymist
+closed_at: 2026-01-27T21:37:57.857883745Z
 ---
 # Generate IDs with 3-char prefix
 
@@ -23,3 +24,9 @@ generate_id should use three-letter prefix for single-segment directory names (e
 - Generated IDs from single-segment directories use a three-letter prefix when available (e.g., `plan` -> `pla-xxxx`).
 - Behavior for multi-segment names remains unchanged.
 - Tests cover the prefix cases above and pass.
+
+## Notes
+
+- Implemented in code and tests. Ready to close.
+
+2026-01-27T21:37:57.857918436Z: Resolved: generate_id uses 3-char prefix for single-segment directories; tests added.

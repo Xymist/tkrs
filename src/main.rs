@@ -639,22 +639,31 @@ fn dep_cycle(args: DepCycleArgs) -> Result<(), String> {
 }
 
 fn cmd_undep(args: DepEdgeArgs) -> Result<(), String> {
-    let path = resolve_ticket_path(&args.id)?;
+    let tickets = read_all_tickets().map_err(|e| format!("failed to read tickets: {e}"))?;
+    if tickets.is_empty() {
+        return Err("Error: ticket not found".to_string());
+    }
+
+    let ticket_id = resolve_partial_id(&tickets, &args.id)?;
+    let dep_id = resolve_partial_id(&tickets, &args.dep_id)?;
+
+    let path = resolve_ticket_path(&ticket_id)?;
     let mut ticket = read_ticket(&path)
         .map_err(|e| format!("failed to read ticket: {e}"))?
         .ok_or_else(|| "ticket missing id".to_string())?;
 
     let before = ticket.deps.len();
-    ticket.deps.retain(|d| d != &args.dep_id);
+    ticket.deps.retain(|d| d != &dep_id);
     if before == ticket.deps.len() {
-        // no-op if absent
-        return Ok(());
+        return Err(format!(
+            "Error: dependency '{dep_id}' not found on '{ticket_id}'"
+        ));
     }
 
     ticket.deps.sort();
     ticket.deps.dedup();
     write_ticket_deps(&ticket.path, &ticket.deps)?;
-    println!("Removed dependency: {} !-> {}", ticket.id, args.dep_id);
+    println!("Removed dependency: {} !-> {}", ticket.id, dep_id);
     Ok(())
 }
 
@@ -1892,6 +1901,15 @@ fn cmd_create(args: CreateArgs) -> Result<(), String> {
     }
     let title = title.to_string();
     let assignee = args.assignee.or_else(git_user_name);
+    let parent = if let Some(parent_raw) = args.parent.as_deref() {
+        let tickets = read_all_tickets().map_err(|e| format!("failed to read tickets: {e}"))?;
+        if tickets.is_empty() {
+            return Err("Error: ticket not found".to_string());
+        }
+        Some(resolve_partial_id(&tickets, parent_raw).map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
     let id = generate_id().map_err(|e| format!("failed to generate id: {e}"))?;
     let file_path = tickets_dir.join(format!("{id}.md"));
     let now = OffsetDateTime::now_utc()
@@ -1941,7 +1959,7 @@ fn cmd_create(args: CreateArgs) -> Result<(), String> {
     if let Some(external) = args.external_ref {
         content.push_str(&format!("external-ref: {external}\n"));
     }
-    if let Some(parent) = args.parent {
+    if let Some(parent) = parent {
         content.push_str(&format!("parent: {parent}\n"));
     }
     if !args.tags.is_empty() {
@@ -2430,10 +2448,25 @@ fn git_user_name() -> Option<String> {
 fn generate_id() -> Result<String, io::Error> {
     let dir = std::env::current_dir()?;
     let dir_name = dir.file_name().unwrap_or_default().to_string_lossy();
-    let mut prefix = dir_name
-        .split(&['-', '_'][..])
-        .filter_map(|s| s.chars().next())
-        .collect::<String>();
+    let segments: Vec<&str> = dir_name.split(&['-', '_'][..]).collect();
+
+    let mut prefix = if segments.len() > 1 {
+        segments
+            .iter()
+            .filter_map(|s| s.chars().next())
+            .collect::<String>()
+    } else {
+        let mut chars = dir_name.chars();
+        let mut collected = String::new();
+        for _ in 0..3 {
+            if let Some(c) = chars.next() {
+                collected.push(c);
+            } else {
+                break;
+            }
+        }
+        collected
+    };
     if prefix.is_empty() {
         prefix = dir_name.chars().take(3).collect();
     }

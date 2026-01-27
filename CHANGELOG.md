@@ -30,10 +30,10 @@
 ### Fixed
 
 - `dep` command now resolves partial IDs for the dependency argument
-- `undep` command now resolves partial IDs and validates dependency exists
+- t-75e3: `undep` resolves partial IDs and errors when dependency missing (2026-01-27)
 - `unlink` command now resolves partial IDs for both arguments
-- `create --parent` now validates and resolves parent ticket ID
-- `generate_id` now uses 3-char prefix for single-segment directory names (e.g., "plan" → "pla" instead of "p")
+- t-569e: `create --parent` resolves partial IDs and errors on missing/ambiguous (2026-01-27)
+- t-9e4d: `generate_id` uses 3-char prefix for single-segment dirs (2026-01-27)
 
 ## [0.3.0] - 2026-01-18
 

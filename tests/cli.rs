@@ -172,6 +172,96 @@ fn create_rejects_empty_title() {
 }
 
 #[test]
+fn create_parent_resolves_partial_and_errors_on_missing_or_ambiguous() {
+    let temp = TempDir::new().unwrap();
+
+    // Seed tickets to resolve against
+    let parent_exact = {
+        let out = tk_cmd(&temp)
+            .arg("create")
+            .arg("Parent One")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let parent_two = {
+        let out = tk_cmd(&temp)
+            .arg("create")
+            .arg("Parent Two")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    // Build shared prefix for ambiguity
+    let mut ambiguous = String::new();
+    for (a, b) in parent_exact.chars().zip(parent_two.chars()) {
+        if a == b {
+            ambiguous.push(a);
+        } else {
+            break;
+        }
+    }
+    if ambiguous.is_empty() {
+        ambiguous.push_str(&parent_exact[..1.min(parent_exact.len())]);
+    }
+
+    // Find a unique prefix for parent_exact that doesn't appear in parent_two
+    let mut unique = String::new();
+    for len in 1..=parent_exact.len() {
+        let sub = &parent_exact[..len];
+        if !parent_two.contains(sub) {
+            unique = sub.to_string();
+            break;
+        }
+    }
+    if unique.is_empty() {
+        unique = parent_exact.clone();
+    }
+
+    // Ambiguous partial should fail
+    tk_cmd(&temp)
+        .arg("create")
+        .arg("Child Ambig")
+        .arg("--parent")
+        .arg(&ambiguous)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("ambiguous ID"));
+
+    // Missing parent should fail
+    tk_cmd(&temp)
+        .arg("create")
+        .arg("Child Missing")
+        .arg("--parent")
+        .arg("no-such")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not found"));
+
+    // Valid partial resolves and writes canonical parent id
+    let out = tk_cmd(&temp)
+        .arg("create")
+        .arg("Child Good")
+        .arg("--parent")
+        .arg(&unique)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let child_id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let child_path = temp.path().join(".tickets").join(format!("{child_id}.md"));
+    let contents = fs::read_to_string(child_path).unwrap();
+    assert!(contents.contains(&format!("parent: {parent_exact}")));
+
+    // Ensure parent_two untouched
+    let p2_path = temp
+        .path()
+        .join(".tickets")
+        .join(format!("{parent_two}.md"));
+    assert!(p2_path.exists());
+}
+
+#[test]
 fn create_rejects_invalid_tag_characters() {
     let temp = TempDir::new().unwrap();
 
@@ -1402,6 +1492,39 @@ fn query_handles_large_ticket_sets_without_quadratic_output() {
 }
 
 #[test]
+fn generate_id_uses_three_char_prefix_for_single_segment_dirs() {
+    let temp = TempDir::new().unwrap();
+    // Create a single-segment dir name "plan" to check prefix
+    let single = temp.path().join("plan");
+    fs::create_dir_all(&single).unwrap();
+
+    let mut cmd = tk_cmd(&temp);
+    let out = cmd
+        .current_dir(&single)
+        .arg("create")
+        .arg("Alpha")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    assert!(id.starts_with("pla-"), "expected 3-char prefix: {id}");
+
+    // Multi-segment should still use first letters of segments
+    let multi = temp.path().join("foo-bar");
+    fs::create_dir_all(&multi).unwrap();
+    let out2 = tk_cmd(&temp)
+        .current_dir(&multi)
+        .arg("create")
+        .arg("Beta")
+        .output()
+        .unwrap();
+    assert!(out2.status.success());
+    let id2 = String::from_utf8_lossy(&out2.stdout).trim().to_string();
+    assert!(id2.starts_with("fb-"), "expected segment initials: {id2}");
+}
+
+#[test]
 fn migrate_beads_creates_tickets() {
     let temp = TempDir::new().unwrap();
 
@@ -1525,6 +1648,95 @@ fn undep_removes_dependency() {
     let ticket_path = temp.path().join(".tickets").join(format!("{parent}.md"));
     let contents = fs::read_to_string(ticket_path).unwrap();
     assert!(contents.contains("deps: []"));
+}
+
+#[test]
+fn undep_resolves_partials_and_errors_when_missing() {
+    let temp = TempDir::new().unwrap();
+
+    // Create tickets with overlapping prefixes to exercise partial resolution
+    let alpha = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("Alpha ticket").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let alps = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("Alps task").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let beta = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("Beta dep").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    // Add dependency using full IDs
+    tk_cmd(&temp)
+        .arg("dep")
+        .arg(&alpha)
+        .arg(&beta)
+        .assert()
+        .success();
+
+    // Ambiguous partial for ticket should error (use shared prefix of alpha/alps)
+    let mut common = String::new();
+    for (a, b) in alpha.chars().zip(alps.chars()) {
+        if a == b {
+            common.push(a);
+        } else {
+            break;
+        }
+    }
+    if common.is_empty() {
+        common.push_str(&alpha[..1.min(alpha.len())]);
+    }
+    tk_cmd(&temp)
+        .arg("undep")
+        .arg(&common)
+        .arg(&beta)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("ambiguous ID"));
+
+    // Missing dependency should error
+    tk_cmd(&temp)
+        .arg("undep")
+        .arg(&alpha)
+        .arg("nope")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not found"));
+
+    // Valid partials succeed
+    // Find a unique prefix for beta not shared with others
+    let mut beta_partial = String::new();
+    for len in 1..=beta.len() {
+        let sub = &beta[..len];
+        if !alpha.contains(sub) && !alps.contains(sub) {
+            beta_partial = sub.to_string();
+            break;
+        }
+    }
+    if beta_partial.is_empty() {
+        beta_partial = beta.clone();
+    }
+    tk_cmd(&temp)
+        .arg("undep")
+        .arg(&alpha)
+        .arg(&beta_partial)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Removed dependency"));
+
+    let ticket_path = temp.path().join(".tickets").join(format!("{alpha}.md"));
+    let contents = fs::read_to_string(ticket_path).unwrap();
+    assert!(contents.contains("deps: []"));
+
+    // Ensure alps untouched
+    let alps_path = temp.path().join(".tickets").join(format!("{alps}.md"));
+    let alps_contents = fs::read_to_string(alps_path).unwrap();
+    assert!(alps_contents.contains("deps: []"));
 }
 
 #[test]
