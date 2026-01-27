@@ -493,7 +493,7 @@ fn read_ticket_graph(include_closed: bool) -> Result<(Vec<Ticket>, TicketGraph),
 }
 
 fn dep_tree(args: DepTreeArgs) -> Result<(), String> {
-    let (tickets, _) = read_ticket_graph(true)?;
+    let (tickets, graph) = read_ticket_graph(true)?;
     if tickets.is_empty() {
         return Err("Error: ticket not found".to_string());
     }
@@ -506,12 +506,19 @@ fn dep_tree(args: DepTreeArgs) -> Result<(), String> {
     let mut stack: Vec<(String, usize)> = Vec::new();
     stack.push((root.clone(), 0));
 
-    println!(
-        "{} [{}] {}",
-        root,
-        lookup.get(&root).map(|t| t.status.as_str()).unwrap_or(""),
-        lookup.get(&root).map(|t| t.title.as_str()).unwrap_or("")
-    );
+    if args.status.is_none()
+        || lookup
+            .get(&root)
+            .map(|t| t.status.as_str())
+            == args.status.as_ref().map(StatusValue::as_str)
+    {
+        println!(
+            "{} [{}] {}",
+            root,
+            lookup.get(&root).map(|t| t.status.as_str()).unwrap_or(""),
+            lookup.get(&root).map(|t| t.title.as_str()).unwrap_or("")
+        );
+    }
 
     while let Some((id, depth)) = stack.pop() {
         if !args.full && !visited.insert(id.clone()) {
@@ -523,8 +530,9 @@ fn dep_tree(args: DepTreeArgs) -> Result<(), String> {
             None => continue,
         };
 
-        let deps = &ticket.deps;
-        let mut children = deps.clone();
+        let deps = graph.get(&ticket.id).cloned().unwrap_or_default();
+        let mut children = deps;
+
         children.sort();
 
         for (idx, child) in children.into_iter().rev().enumerate() {
@@ -534,6 +542,19 @@ fn dep_tree(args: DepTreeArgs) -> Result<(), String> {
             let prefix = "    ".repeat(depth);
             let connector = if idx == 0 { "└── " } else { "├── " };
             let child_ticket = lookup.get(&child);
+            if let Some(t) = child_ticket {
+                if args.only_open && t.status == "closed" {
+                    continue;
+                }
+                if let Some(status) = args.status.as_ref().map(StatusValue::as_str)
+                    && t.status != status
+                {
+                    continue;
+                }
+            } else if args.only_open {
+                continue;
+            }
+
             println!(
                 "{}{}{} [{}] {}",
                 prefix,
@@ -1737,6 +1758,22 @@ struct DepTreeArgs {
         help = "Show all nodes (disable dedup)"
     )]
     full: bool,
+
+    #[arg(
+        short = 's',
+        long = "status",
+        value_enum,
+        help = "Filter nodes by status (open|in_progress|closed)"
+    )]
+    status: Option<StatusValue>,
+
+    #[arg(
+        long = "only-open",
+        default_value_t = false,
+        help = "Skip closed dependencies when traversing"
+    )]
+    only_open: bool,
+
     id: String,
 }
 

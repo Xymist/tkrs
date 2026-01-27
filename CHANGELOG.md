@@ -25,6 +25,7 @@
 - t-cea5: `ready` reuses cached metadata, adds `--status` and `--show-deps`, and sorts by priority/id (2026-01-27)
 - t-ceb5: `undep` uses shared dep mutation, is idempotent, and normalizes empty deps (2026-01-27)
 - t-dcc8: `add-note` avoids duplicate headers, normalizes newlines, and supports tagged notes (2026-01-27)
+- t-eb47: `dep tree` adds status/only-open filters and uses cached graph with stable sorting (2026-01-27)
 
 ### Changed
 

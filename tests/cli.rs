@@ -1,4 +1,4 @@
-use assert_cmd::{Command, cargo::cargo_bin_cmd};
+use assert_cmd::{cargo::cargo_bin_cmd, Command};
 use assert_fs::TempDir;
 use predicates::prelude::*;
 use std::fs;
@@ -681,6 +681,75 @@ fn dep_tree_prints_tree() {
         .success()
         .stdout(predicate::str::contains(&root))
         .stdout(predicate::str::contains(&child));
+}
+
+#[test]
+fn dep_tree_filters_by_status_and_only_open() {
+    let temp = TempDir::new().unwrap();
+
+    let root = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("Root").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    let open_dep = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("Open Dep").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    let in_progress_dep = {
+        let mut create = tk_cmd(&temp);
+        let out = create
+            .arg("create")
+            .arg("In Progress Dep")
+            .output()
+            .unwrap();
+        let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        tk_cmd(&temp).arg("start").arg(&id).assert().success();
+        id
+    };
+
+    let closed_dep = {
+        let mut create = tk_cmd(&temp);
+        let out = create.arg("create").arg("Closed Dep").output().unwrap();
+        let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        tk_cmd(&temp).arg("close").arg(&id).assert().success();
+        id
+    };
+
+    for dep in [&open_dep, &in_progress_dep, &closed_dep] {
+        tk_cmd(&temp)
+            .arg("dep")
+            .arg(&root)
+            .arg(dep)
+            .assert()
+            .success();
+    }
+
+    tk_cmd(&temp)
+        .arg("dep")
+        .arg("tree")
+        .arg(&root)
+        .arg("--status")
+        .arg("closed")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&closed_dep))
+        .stdout(predicate::str::contains(&open_dep).not())
+        .stdout(predicate::str::contains(&in_progress_dep).not());
+
+    tk_cmd(&temp)
+        .arg("dep")
+        .arg("tree")
+        .arg(&root)
+        .arg("--only-open")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&open_dep))
+        .stdout(predicate::str::contains(&in_progress_dep))
+        .stdout(predicate::str::contains(&closed_dep).not());
 }
 
 #[test]
@@ -1414,12 +1483,10 @@ fn show_json_includes_resolved_titles_and_body() {
     assert_eq!(json["deps"][0]["title"], "Parent Ticket");
     assert_eq!(json["links"][0]["title"], "Parent Ticket");
     assert_eq!(json["tags"], serde_json::json!(["feat", "backend"]));
-    assert!(
-        json["body"]["raw"]
-            .as_str()
-            .unwrap()
-            .contains("# Child Ticket")
-    );
+    assert!(json["body"]["raw"]
+        .as_str()
+        .unwrap()
+        .contains("# Child Ticket"));
     assert_eq!(json["body"]["design"], "Design text");
     assert_eq!(json["body"]["acceptance"], "Do the thing");
     assert_eq!(json["body"]["notes"], "Note here");
