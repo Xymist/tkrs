@@ -176,6 +176,13 @@ struct DepArgs {
 
     /// Dependency add: dep <id> <dep-id>
     dep_id: Option<String>,
+
+    #[arg(
+        long = "check-cycle",
+        default_value_t = false,
+        help = "Detect new dependency cycles after adding and revert if introduced"
+    )]
+    check_cycle: bool,
 }
 
 #[derive(Args, Debug)]
@@ -210,24 +217,33 @@ fn dep_add(args: DepArgs) -> Result<(), String> {
         .dep_id
         .ok_or_else(|| "Usage: tk dep <id> <dependency-id>".to_string())?;
 
-    let ticket_path = resolve_ticket_path(&id)?;
-    let _dep_path = resolve_ticket_path(&dep_id)?; // validate exists
+    let (ticket_path, dep_path) = resolve_dep_paths(&id, &dep_id)?;
 
-    let mut ticket = read_ticket(&ticket_path)
+    let ticket = read_ticket(&ticket_path)
         .map_err(|e| format!("failed to read ticket: {e}"))?
         .ok_or_else(|| "ticket missing id".to_string())?;
 
-    if ticket.deps.iter().any(|d| d == &dep_id) {
+    let mut deps: HashSet<String> = ticket.deps.iter().cloned().collect();
+    if !deps.insert(dep_path.0.clone()) {
         println!("Dependency already exists");
         return Ok(());
     }
 
-    ticket.deps.push(dep_id.clone());
-    ticket.deps.sort();
-    ticket.deps.dedup();
+    let mut deps_vec: Vec<String> = deps.into_iter().collect();
+    deps_vec.sort();
 
-    write_ticket_deps(&ticket.path, &ticket.deps)?;
-    println!("Added dependency: {} -> {}", ticket.id, dep_id);
+    let original = ticket.deps.clone();
+    write_ticket_deps(&ticket.path, &deps_vec)?;
+
+    if args.check_cycle
+        && let Err(e) = check_for_new_cycle(&ticket.id)
+    {
+        // revert on cycle detection
+        write_ticket_deps(&ticket.path, &original)?;
+        return Err(e);
+    }
+
+    println!("Added dependency: {} -> {}", ticket.id, dep_path.0);
     Ok(())
 }
 
@@ -271,6 +287,75 @@ fn write_ticket_deps(path: &Path, deps: &[String]) -> Result<(), String> {
     }
 
     fs::write(path, output).map_err(|e| format!("failed to write ticket: {e}"))?;
+    Ok(())
+}
+
+fn resolve_dep_paths(id: &str, dep_id: &str) -> Result<(PathBuf, (String, PathBuf)), String> {
+    let tickets = read_all_tickets().map_err(|e| e.to_string())?;
+    if tickets.is_empty() {
+        return Err("Error: ticket not found".to_string());
+    }
+
+    let target_id = resolve_partial_id(&tickets, id)?;
+    let dep_target_id = resolve_partial_id(&tickets, dep_id)?;
+
+    let ticket_path = resolve_ticket_path(&target_id)?;
+    let dep_path = resolve_ticket_path(&dep_target_id)?;
+
+    Ok((ticket_path, (dep_target_id, dep_path)))
+}
+
+fn check_for_new_cycle(ticket_id: &str) -> Result<(), String> {
+    let (_, graph) = read_ticket_graph(false)?;
+    if graph.is_empty() {
+        return Ok(());
+    }
+
+    fn dfs(
+        node: &str,
+        graph: &HashMap<String, Vec<String>>,
+        state: &mut HashMap<String, u8>,
+        stack: &mut Vec<String>,
+    ) -> bool {
+        state.insert(node.to_string(), 1);
+        stack.push(node.to_string());
+
+        if let Some(children) = graph.get(node) {
+            for child in children {
+                if !graph.contains_key(child) {
+                    continue;
+                }
+                match state.get(child).copied().unwrap_or(0) {
+                    0 => {
+                        if dfs(child, graph, state, stack) {
+                            return true;
+                        }
+                    }
+                    1 => return true,
+                    _ => {}
+                }
+            }
+        }
+
+        stack.pop();
+        state.insert(node.to_string(), 2);
+        false
+    }
+
+    let mut has_cycle = false;
+    if let Some(deps) = graph.get(ticket_id) {
+        let mut sub_state = HashMap::new();
+        for dep in deps {
+            if dfs(dep, &graph, &mut sub_state, &mut Vec::new()) {
+                has_cycle = true;
+                break;
+            }
+        }
+    }
+
+    if has_cycle {
+        return Err("cycle detected; dependency not added".to_string());
+    }
     Ok(())
 }
 
@@ -532,6 +617,8 @@ fn cmd_undep(args: DepEdgeArgs) -> Result<(), String> {
         return Ok(());
     }
 
+    ticket.deps.sort();
+    ticket.deps.dedup();
     write_ticket_deps(&ticket.path, &ticket.deps)?;
     println!("Removed dependency: {} !-> {}", ticket.id, args.dep_id);
     Ok(())

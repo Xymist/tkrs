@@ -304,6 +304,113 @@ fn dep_add_appends_dependency() {
 }
 
 #[test]
+fn dep_add_detects_ambiguous_ids() {
+    let temp = TempDir::new().unwrap();
+
+    let one = tk_cmd(&temp).arg("create").arg("Alpha").output().unwrap();
+    let two = tk_cmd(&temp).arg("create").arg("Alpine").output().unwrap();
+    let target = tk_cmd(&temp).arg("create").arg("Target").output().unwrap();
+    let target_id = String::from_utf8_lossy(&target.stdout).trim().to_string();
+
+    let one_id = String::from_utf8_lossy(&one.stdout).trim().to_string();
+    let two_id = String::from_utf8_lossy(&two.stdout).trim().to_string();
+
+    // find a short substring common to both ids to trigger ambiguity
+    let mut ambiguous = String::new();
+    for (a, b) in one_id.chars().zip(two_id.chars()) {
+        if a == b {
+            ambiguous.push(a);
+            if ambiguous.len() >= 2 {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    if ambiguous.is_empty() {
+        ambiguous.push_str(&one_id[0..2.min(one_id.len())]);
+    }
+
+    tk_cmd(&temp)
+        .arg("dep")
+        .arg(&ambiguous)
+        .arg(&target_id)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("ambiguous ID"));
+}
+
+#[test]
+fn dep_add_check_cycle_reverts_on_cycle() {
+    let temp = TempDir::new().unwrap();
+
+    let root = {
+        let out = tk_cmd(&temp).arg("create").arg("Root").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let dep = {
+        let out = tk_cmd(&temp).arg("create").arg("Dep").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    tk_cmd(&temp)
+        .arg("dep")
+        .arg(&root)
+        .arg(&dep)
+        .assert()
+        .success();
+
+    tk_cmd(&temp)
+        .arg("dep")
+        .arg(&dep)
+        .arg(&root)
+        .arg("--check-cycle")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cycle detected"));
+
+    let dep_path = temp.path().join(".tickets").join(format!("{dep}.md"));
+    let contents = fs::read_to_string(dep_path).unwrap();
+    assert!(
+        contents.contains("deps: []"),
+        "deps were reverted: {contents}"
+    );
+}
+
+#[test]
+fn dep_add_is_idempotent() {
+    let temp = TempDir::new().unwrap();
+
+    let root = {
+        let out = tk_cmd(&temp).arg("create").arg("Root").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let dep = {
+        let out = tk_cmd(&temp).arg("create").arg("Dep").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    tk_cmd(&temp)
+        .arg("dep")
+        .arg(&root)
+        .arg(&dep)
+        .assert()
+        .success();
+
+    tk_cmd(&temp)
+        .arg("dep")
+        .arg(&root)
+        .arg(&dep)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("already exists"));
+
+    let root_path = temp.path().join(".tickets").join(format!("{root}.md"));
+    let contents = fs::read_to_string(root_path).unwrap();
+    assert_eq!(contents.matches(&dep).count(), 1, "dep listed once");
+}
+
+#[test]
 fn dep_tree_prints_tree() {
     let temp = TempDir::new().unwrap();
 
