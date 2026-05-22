@@ -1006,6 +1006,83 @@ fn ls_supports_columns_json_and_stable_ordering() {
 }
 
 #[test]
+fn ls_filters_by_parent_and_surfaces_parent_in_json() {
+    let temp = TempDir::new().unwrap();
+
+    let parent_id = {
+        let out = tk_cmd(&temp).arg("create").arg("Epic").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    let child_id = {
+        let out = tk_cmd(&temp)
+            .arg("create")
+            .arg("Child")
+            .arg("--parent")
+            .arg(&parent_id)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    let orphan_id = {
+        let out = tk_cmd(&temp).arg("create").arg("Orphan").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    // --parent filter returns only direct children
+    tk_cmd(&temp)
+        .arg("ls")
+        .arg("--parent")
+        .arg(&parent_id)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&child_id))
+        .stdout(predicate::str::contains(&orphan_id).not())
+        .stdout(predicate::str::contains(&parent_id).not());
+
+    // --parent accepts the partial-ID form other commands use
+    let suffix: String = parent_id
+        .rsplit('-')
+        .next()
+        .expect("id has prefix")
+        .chars()
+        .take(3)
+        .collect();
+    tk_cmd(&temp)
+        .arg("ls")
+        .arg("--parent")
+        .arg(&suffix)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&child_id));
+
+    // JSON output surfaces parent unconditionally
+    let out = tk_cmd(&temp).arg("ls").arg("--json").output().unwrap();
+    assert!(out.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let arr = json.as_array().expect("array");
+    let child = arr.iter().find(|v| v["id"] == child_id).expect("child row");
+    assert_eq!(
+        child["parent"],
+        serde_json::Value::String(parent_id.clone())
+    );
+    let orphan = arr
+        .iter()
+        .find(|v| v["id"] == orphan_id)
+        .expect("orphan row");
+    assert_eq!(orphan["parent"], serde_json::Value::Null);
+
+    // unknown --parent surfaces a resolution error
+    tk_cmd(&temp)
+        .arg("ls")
+        .arg("--parent")
+        .arg("does-not-exist")
+        .assert()
+        .failure();
+}
+
+#[test]
 fn ready_lists_when_dependencies_closed() {
     let temp = TempDir::new().unwrap();
 

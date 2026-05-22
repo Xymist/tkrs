@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `tk ls --parent <id>` filters the listing to direct children of the given parent (partial IDs accepted).
+- `tk ls --json` output now always includes a `parent` field on every row (null when absent).
+
 ## [0.4.0] - 2026-01-27
 
 ### Added

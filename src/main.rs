@@ -908,6 +908,11 @@ fn cmd_ls(args: ListArgs) -> Result<(), String> {
             .then_with(|| a.id.cmp(&b.id))
     });
 
+    let parent_filter = match args.parent.as_deref() {
+        Some(raw) => Some(resolve_partial_id(&tickets, raw).map_err(|e| e.to_string())?),
+        None => None,
+    };
+
     let filtered: Vec<&Ticket> = tickets
         .iter()
         .filter(|ticket| {
@@ -917,6 +922,10 @@ fn cmd_ls(args: ListArgs) -> Result<(), String> {
                 args.assignee.as_deref(),
                 args.tags.first().map(|s| s.as_str()),
             )
+        })
+        .filter(|ticket| match parent_filter.as_deref() {
+            Some(p) => ticket.parent.as_deref() == Some(p),
+            None => true,
         })
         .collect();
 
@@ -932,6 +941,7 @@ fn cmd_ls(args: ListArgs) -> Result<(), String> {
                     "priority": t.priority.unwrap_or(2),
                     "assignee": t.assignee,
                     "tags": t.tags,
+                    "parent": t.parent,
                 })
             })
             .collect();
@@ -1840,6 +1850,13 @@ struct ListArgs {
         help = "Output rows as JSON array"
     )]
     json: bool,
+
+    #[arg(
+        long = "parent",
+        value_name = "ID",
+        help = "Only list direct children of this parent ticket (partial ID accepted)"
+    )]
+    parent: Option<String>,
 }
 
 #[derive(Args, Debug)]
