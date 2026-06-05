@@ -51,6 +51,7 @@ enum Command {
     #[command(about = "Remove link between tickets")]
     Unlink(UnlinkArgs),
     #[command(about = "List tickets")]
+    #[clap(aliases = &["list"])]
     Ls(ListArgs),
     #[command(about = "List open/in-progress tickets with deps resolved")]
     Ready(FilterArgs),
@@ -384,10 +385,8 @@ fn check_for_new_cycle(ticket_id: &str) -> Result<(), String> {
                     continue;
                 }
                 match state.get(child).copied().unwrap_or(0) {
-                    0 => {
-                        if dfs(child, graph, state, stack) {
-                            return true;
-                        }
+                    0 if dfs(child, graph, state, stack) => {
+                        return true;
                     }
                     1 => return true,
                     _ => {}
