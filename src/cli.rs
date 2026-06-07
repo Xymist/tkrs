@@ -326,7 +326,7 @@ pub struct ListArgs {
     #[arg(
         long = "parent",
         value_name = "ID",
-        help = "Only list direct children of this parent ticket (partial ID accepted)"
+        help = "Pass the ID or partial ID of an epic to list its child tickets."
     )]
     parent: Option<String>,
 }
@@ -348,6 +348,13 @@ pub struct FilterArgs {
         help = "Show dependency count for each ticket"
     )]
     show_deps: bool,
+
+    #[arg(
+        long = "parent",
+        value_name = "ID",
+        help = "Pass the ID or partial ID of an epic to filter by its child tickets."
+    )]
+    parent: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -364,6 +371,13 @@ pub struct BlockedArgs {
         help = "Show only blockers that are open"
     )]
     only_open: bool,
+
+    #[arg(
+        long = "parent",
+        value_name = "ID",
+        help = "Pass the ID or partial ID of an epic to filter by its child tickets."
+    )]
+    parent: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -722,15 +736,22 @@ pub fn cmd_unlink(args: UnlinkArgs) -> color_eyre::Result<()> {
 
 pub fn cmd_ls(args: ListArgs) -> color_eyre::Result<()> {
     let tickets = lock_tickets()?;
+    let parent = if let Some(p) = args.parent {
+        Some(resolve_partial_id(&tickets, &p)?)
+    } else {
+        None
+    };
 
     let filtered: Vec<&Ticket> = tickets
         .iter()
         .filter(|ticket| {
             ticket_matches_filters(
+                &tickets,
                 ticket,
                 args.status,
                 args.assignee.as_deref(),
                 args.tags.first().map(|s| s.as_str()),
+                parent.as_deref(),
             )
         })
         .collect();
@@ -800,6 +821,12 @@ pub fn cmd_ready(args: FilterArgs) -> color_eyre::Result<()> {
         return Ok(());
     }
 
+    let parent = if let Some(p) = args.parent {
+        Some(resolve_partial_id(&tickets, &p)?)
+    } else {
+        None
+    };
+
     let lookup: HashMap<_, _> = tickets.iter().map(|t| (t.id(), t)).collect();
     let status_filter = args.status;
     let ready: Vec<&Ticket> = tickets
@@ -812,10 +839,12 @@ pub fn cmd_ready(args: FilterArgs) -> color_eyre::Result<()> {
             };
             status_match
                 && ticket_matches_filters(
+                    &tickets,
                     ticket,
                     None,
                     args.assignee.as_deref(),
                     args.tags.first().map(|s| s.as_str()),
+                    parent.as_deref(),
                 )
         })
         .filter(|ticket| {
@@ -855,18 +884,24 @@ pub fn cmd_blocked(args: BlockedArgs) -> color_eyre::Result<()> {
         return Ok(());
     }
 
+    let parent = if let Some(p) = args.parent {
+        Some(resolve_partial_id(&tickets, &p)?)
+    } else {
+        None
+    };
     let lookup: HashMap<_, _> = tickets.iter().map(|t| (t.id(), t)).collect();
-
     let mut blocked: Vec<(&Ticket, Vec<String>)> = Vec::new();
     for ticket in tickets.iter() {
         if ticket.status() != &StatusValue::Open && ticket.status() != &StatusValue::InProgress {
             continue;
         }
         if !ticket_matches_filters(
+            &tickets,
             ticket,
             None,
             args.assignee.as_deref(),
             args.tags.first().map(|s| s.as_str()),
+            parent.as_deref(),
         ) {
             continue;
         }

@@ -339,10 +339,12 @@ pub fn build_link_plan(
 }
 
 pub fn ticket_matches_filters(
+    tickets: &[Ticket],
     ticket: &Ticket,
     status: Option<StatusValue>,
     assignee: Option<&str>,
     tag: Option<&str>,
+    parent: Option<&str>,
 ) -> bool {
     if let Some(s) = status
         && ticket.status() != &s
@@ -356,6 +358,13 @@ pub fn ticket_matches_filters(
     }
     if let Some(tag) = tag
         && !ticket.tags().iter().any(|t| t == tag)
+    {
+        return false;
+    }
+    if let Some(parent_id) = parent
+        && !tickets
+            .iter()
+            .any(|t| t.id() == parent_id && t.deps().contains(&ticket.id().to_string()))
     {
         return false;
     }
