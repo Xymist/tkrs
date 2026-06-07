@@ -139,6 +139,13 @@ pub struct CreateArgs {
         help = "Append body content from file to the description"
     )]
     body_from_file: Option<PathBuf>,
+
+    #[arg(
+        long = "edit",
+        default_value_t = false,
+        help = "Launch editor to compose ticket body after creation"
+    )]
+    edit: bool,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -540,28 +547,33 @@ pub fn cmd_undep(args: DepEdgeArgs) -> color_eyre::Result<()> {
 }
 
 pub fn cmd_start(args: StartArgs) -> color_eyre::Result<()> {
-    let tickets = lock_tickets()?;
+    let mut tickets = lock_tickets()?;
     let id = resolve_partial_id(&tickets, &args.id)?;
-    set_status_with_note(&id, StatusValue::InProgress, args.note.as_deref())
+    set_status_with_note(
+        &id,
+        StatusValue::InProgress,
+        args.note.as_deref(),
+        &mut tickets,
+    )
 }
 
 pub fn cmd_close(args: CloseArgs) -> color_eyre::Result<()> {
-    let tickets = lock_tickets()?;
+    let mut tickets = lock_tickets()?;
     let id = resolve_partial_id(&tickets, &args.id)?;
-    set_status_with_note(&id, StatusValue::Closed, args.note.as_deref())
+    set_status_with_note(&id, StatusValue::Closed, args.note.as_deref(), &mut tickets)
 }
 
 pub fn cmd_reopen(args: ReopenArgs) -> color_eyre::Result<()> {
-    let tickets = lock_tickets()?;
+    let mut tickets = lock_tickets()?;
     let id = resolve_partial_id(&tickets, &args.id)?;
-    set_status_with_note(&id, StatusValue::Open, args.note.as_deref())
+    set_status_with_note(&id, StatusValue::Open, args.note.as_deref(), &mut tickets)
 }
 
 pub fn cmd_status(args: StatusArgs) -> color_eyre::Result<()> {
-    let tickets = lock_tickets()?;
+    let mut tickets = lock_tickets()?;
     let status = parse_status(&args.status)?;
     let id = resolve_partial_id(&tickets, &args.id)?;
-    set_status_with_note(&id, status, args.note.as_deref())
+    set_status_with_note(&id, status, args.note.as_deref(), &mut tickets)
 }
 
 pub fn cmd_edit(args: EditArgs) -> color_eyre::Result<()> {
@@ -1216,6 +1228,15 @@ pub fn cmd_create(args: CreateArgs) -> color_eyre::Result<()> {
         dep_add(&parent_id, &id, true, &mut tickets)?;
     };
 
-    println!("{id}");
+    if let Some(edit) = args.edit.then(|| EditArgs {
+        id: id.clone(),
+        print: false,
+        force: false,
+    }) {
+        cmd_edit(edit)?;
+    } else {
+        println!("{id}");
+    }
+
     Ok(())
 }

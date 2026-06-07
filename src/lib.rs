@@ -623,8 +623,8 @@ pub fn set_status_with_note(
     id: &str,
     status: StatusValue,
     note: Option<&str>,
+    tickets: &mut [Ticket],
 ) -> color_eyre::Result<()> {
-    let mut tickets = lock_tickets()?;
     let ticket = tickets
         .iter_mut()
         .find(|t| t.id() == id)
@@ -637,10 +637,11 @@ pub fn set_status_with_note(
         return Ok(());
     }
 
+    let tag = Some(format!("status_change: {} -> {}", current_status, status));
     ticket.update_status(status);
     ticket.add_note(
         note.unwrap_or(&format!("Status updated to {}", status)),
-        Some("status_change"),
+        tag.as_deref(),
         true,
     )?;
 
