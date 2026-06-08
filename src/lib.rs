@@ -693,7 +693,12 @@ pub struct Ticket {
 
 impl Ticket {
     pub fn summary(&self) -> String {
-        format!("{}: {}", self.id(), self.title)
+        format!(
+            "[P{}] {}: {}",
+            self.frontmatter.priority,
+            self.id(),
+            self.title
+        )
     }
 
     pub fn update_status(&mut self, new_status: StatusValue) {
@@ -744,7 +749,7 @@ pub struct TicketFrontmatter {
     deps: Vec<String>,
     #[serde(default)]
     links: Vec<String>,
-    priority: Option<u8>,
+    priority: u8,
     assignee: Option<String>,
     #[serde(default)]
     tags: Vec<String>,
@@ -846,7 +851,7 @@ impl Ticket {
     }
 
     pub fn priority(&self) -> u8 {
-        self.frontmatter.priority.unwrap_or(2)
+        self.frontmatter.priority
     }
 
     pub fn assignee(&self) -> Option<&str> {

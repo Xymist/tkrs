@@ -5,28 +5,40 @@ use ratatui::{
     DefaultTerminal, Frame,
     buffer::Buffer,
     crossterm,
-    layout::Rect,
-    widgets::{Block, ScrollbarOrientation, StatefulWidget, Widget},
+    layout::{Constraint, Layout, Margin, Rect},
+    style::{Color, Style},
+    widgets::{Block, Paragraph, ScrollbarOrientation, StatefulWidget, Widget, Wrap},
 };
 use tui_tree_widget::{Scrollbar, ScrollbarState, Tree, TreeItem, TreeState};
 
 use crate::Ticket;
+
+#[derive(Debug, Default, PartialEq)]
+enum Focus {
+    #[default]
+    Tickets,
+    Content,
+}
 
 #[derive(Debug, Default)]
 pub struct TuiApp {
     tickets: Vec<Ticket>,
     exit: bool,
     tree_state: TreeState<String>,
-    vertical_scroll: u16,
+    focus: Focus,
+    content_scroll: u16,
 }
 
 impl TuiApp {
     pub fn new(tickets: Vec<Ticket>) -> Self {
+        let mut tree_state = TreeState::default();
+        tree_state.select_first();
         Self {
             tickets,
             exit: false,
-            tree_state: TreeState::default(),
-            vertical_scroll: 0,
+            tree_state,
+            focus: Focus::Tickets,
+            content_scroll: 0,
         }
     }
     /// runs the application's main loop until the user quits
@@ -55,8 +67,59 @@ impl TuiApp {
     }
 
     fn handle_key_event(&mut self, key_event: KeyEvent) {
-        if key_event.code == KeyCode::Esc {
-            self.exit()
+        match key_event.code {
+            KeyCode::Char('q') | KeyCode::Esc => self.exit(),
+            KeyCode::Tab => {
+                self.focus = match self.focus {
+                    Focus::Tickets => Focus::Content,
+                    Focus::Content => Focus::Tickets,
+                };
+            }
+            _ => match self.focus {
+                Focus::Tickets => self.handle_tree_key(key_event),
+                Focus::Content => self.handle_content_key(key_event),
+            },
+        }
+    }
+
+    fn handle_tree_key(&mut self, key_event: KeyEvent) {
+        match key_event.code {
+            KeyCode::Down => {
+                self.tree_state.key_down();
+            }
+            KeyCode::Up => {
+                self.tree_state.key_up();
+            }
+            KeyCode::Char(' ') => {
+                self.tree_state.toggle_selected();
+            }
+            KeyCode::Right => {
+                self.tree_state.key_right();
+            }
+            KeyCode::Left => {
+                self.tree_state.key_left();
+            }
+            _ => {}
+        }
+        // reset scroll when selection changes
+        self.content_scroll = 0;
+    }
+
+    fn handle_content_key(&mut self, key_event: KeyEvent) {
+        match key_event.code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.content_scroll = self.content_scroll.saturating_add(1);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.content_scroll = self.content_scroll.saturating_sub(1);
+            }
+            KeyCode::PageDown => {
+                self.content_scroll = self.content_scroll.saturating_add(10);
+            }
+            KeyCode::PageUp => {
+                self.content_scroll = self.content_scroll.saturating_sub(10);
+            }
+            _ => {}
         }
     }
 
@@ -67,32 +130,79 @@ impl TuiApp {
 
 impl Widget for &mut TuiApp {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        let [ticket_window, content_window] =
+            Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
         let items: Vec<TreeItem<String>> = assemble_ticket_tree(&self.tickets).unwrap_or_default();
+        let (ticket_border, content_border) = if self.focus == Focus::Tickets {
+            (Style::default().fg(Color::Blue), Style::default())
+        } else {
+            (Style::default(), Style::default().fg(Color::Blue))
+        };
 
         let tree_widget = Tree::new(&items)
             .expect("all item identifiers are unique")
-            .block(Block::bordered().title("Tickets"));
-
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("↑"))
-            .end_symbol(Some("↓"));
-
-        let mut scrollbar_state =
-            ScrollbarState::new(items.len()).position(self.vertical_scroll.into());
-
+            .block(
+                Block::bordered()
+                    .border_style(ticket_border)
+                    .title("Tickets [↑/↓ to navigate, →/← to expand/collapse, space to select, Tab to switch focus]"),
+            )
+            .highlight_style(Style::default().bg(Color::Blue))
+            .experimental_scrollbar(Some(
+                Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(Some("↑"))
+                    .end_symbol(Some("↓")),
+            ));
         <Tree<String> as StatefulWidget>::render(
             tree_widget,
-            Rect::new(1, 1, area.width - 2, area.height - 2),
+            ticket_window,
             buf,
             &mut self.tree_state,
         );
 
-        <Scrollbar as StatefulWidget>::render(
-            scrollbar,
-            Rect::new(area.width - 1, 1, 1, area.height - 2),
-            buf,
-            &mut scrollbar_state,
-        );
+        let content = Paragraph::new(
+            self.tickets
+                .iter()
+                .find(|t| Some(&t.id().to_string()) == self.tree_state.selected().last())
+                .map(|t| format!("{}", t.body))
+                .unwrap_or("No ticket selected".to_string()),
+        )
+        .block(
+            Block::bordered()
+                .border_style(content_border)
+                .title("Content"),
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((self.content_scroll, 0));
+
+        let inner_width = content_window.width.saturating_sub(2);
+        let inner_height = content_window.height.saturating_sub(2);
+        let total_lines = content.line_count(inner_width) as u16;
+        let max_scroll = total_lines.saturating_sub(inner_height);
+        self.content_scroll = self.content_scroll.min(max_scroll);
+
+        content
+            .scroll((self.content_scroll, 0))
+            .render(content_window, buf);
+
+        let mut scrollbar_state = ScrollbarState::new(max_scroll as usize + 1)
+            .position(self.content_scroll as usize)
+            .viewport_content_length(inner_height as usize);
+
+        if total_lines > inner_height {
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓"));
+
+            StatefulWidget::render(
+                scrollbar,
+                content_window.inner(Margin {
+                    vertical: 1,
+                    horizontal: 0,
+                }),
+                buf,
+                &mut scrollbar_state,
+            );
+        }
     }
 }
 

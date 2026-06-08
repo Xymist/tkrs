@@ -1207,7 +1207,7 @@ pub fn cmd_create(args: CreateArgs) -> color_eyre::Result<()> {
             links: Vec::new(),
             created: Some(now.clone()),
             r#type: Some(args.ticket_type.as_str().to_string()),
-            priority: Some(args.priority),
+            priority: args.priority,
             assignee: assignee.clone(),
             external_ref: args.external_ref.clone(),
             tags: args.tags.clone(),
