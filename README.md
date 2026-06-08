@@ -1,8 +1,6 @@
 # ticket
 
-The git-backed issue tracker for AI agents. Rooted in the Unix Philosophy, `tk` is inspired by Joe Armstrong's [Minimal Viable Program](https://joearms.github.io/published/2014-06-25-minimal-viable-program.html) with additional quality of life features for managing and querying against complex issue dependency graphs.
-
-`tk` was written as a full replacement for [beads](https://github.com/steveyegge/beads). It shares many similar commands but without the need for keeping a SQLite file in sync or a rogue background daemon mangling your changes. It ships with a `migrate-beads` command to make this a smooth transition.
+The git-backed issue tracker for AI agents. `tk` is inspired by Joe Armstrong's [Minimal Viable Program](https://joearms.github.io/published/2014-06-25-minimal-viable-program.html) with additional quality of life features for managing and querying against complex issue dependency graphs.
 
 Tickets are markdown files with YAML frontmatter in `.tickets/`. `tk` will search upward from the current directory to find the nearest `.tickets/` (or respect `TICKETS_DIR` when set), so commands work from any subdirectory. This allows AI agents to easily search them for relevant content without dumping ten thousand character JSONL lines into their context window.
 
@@ -20,10 +18,8 @@ VS Code allows you to Ctrl+Click or Cmd+Click the ID and jump directly to the fi
 
 ```bash
 git clone https://github.com/xymist/tkrs.git
-cd tkrs && cargo build --release && ln -s "$PWD/target/release/tk" ~/.local/bin/tk
+cd tkrs && cargo install --path .
 ```
-
-**Or** just copy `target/release/tk` to somewhere in your PATH.
 
 ## Requirements
 
@@ -41,15 +37,15 @@ Claude Opus picks it up naturally from there. Other models may need additional g
 
 ## Commands
 
-- `tk create` — create a ticket with optional fields
+- `tk create` — create a ticket, with optional fields
 - `tk start|close|reopen|status` — set ticket status (all accept `--note`; close records `closed_at` automatically; reopen clears `closed_at` and can log a note)
 - `tk dep|undep|link|unlink` — manage dependencies and links (use `tk dep cycle --include-closed` to scan closed tickets too; `unlink` supports `--warn-missing`; `link` supports `--dry-run`; `undep` is idempotent and normalizes deps; `dep tree` supports `--status` and `--only-open`)
-- `tk ls` — list tickets with filters (supports `--columns`, `--json`, and `--parent <id>` to scope to direct children of a parent; the `--json` shape always includes the `parent` field)
+- `tk ls|list` — list tickets with filters (supports `--columns`, `--json`, and `--parent <id>` to scope to direct children of a parent; the `--json` shape always includes the `parent` field)
 - `tk ready|blocked` — show tickets with dependency readiness (`ready` supports `--status` and `--show-deps`; `blocked` supports `--only-open`)
 - `tk closed` — list recently closed tickets (supports `--limit`, `--since <RFC3339>`, `--assignee`, `--tags`)
 - `tk show|edit|add-note` — inspect and edit tickets (`show` supports `--json`; `add-note` is idempotent on headers and supports `--tag <label>`)
 - `tk query [FILTER]` — output tickets as JSON; supports `--format ndjson|pretty` and built-in filters (`field==value` exact match, `field~substr` contains)
-- `tk migrate-beads` — import beads issues from `.beads/issues.jsonl`
+- `tk tui` — EXPERIMENTAL - Start a TUI for browsing tickets with a little more context than just a bucket of IDs.
 
 ## Release workflow
 
