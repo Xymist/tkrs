@@ -16,7 +16,7 @@ fn main() -> color_eyre::Result<()> {
     match cli.command {
         Command::Tui => {
             color_eyre::install()?;
-            ratatui::run(|terminal| TuiApp::new(lock_tickets()?.clone()).run(terminal))?
+            ratatui::run(|terminal| TuiApp::new(&lock_tickets()?).run(terminal))?
         }
         Command::Create(args) => cmd_create(args)?,
         Command::Start(args) => cmd_start(args)?,

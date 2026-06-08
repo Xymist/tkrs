@@ -7,7 +7,6 @@ use crate::Ticket;
 const ID_LENGTH: usize = 5;
 
 pub fn resolve_partial_id(tickets: &[Ticket], needle: &str) -> color_eyre::Result<String> {
-    eprintln!("Resolving ID '{}' among {} tickets", needle, tickets.len());
     let mut matches = tickets
         .iter()
         .filter(|t| t.id().contains(needle))

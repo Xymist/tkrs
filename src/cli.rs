@@ -513,8 +513,8 @@ impl Display for StatusValue {
 pub fn cmd_dep(args: DepArgs) -> color_eyre::Result<()> {
     let mut tickets = lock_tickets()?;
     match args.action {
-        Some(DepAction::Tree(tree_args)) => dep_tree(tree_args),
-        Some(DepAction::Cycle(cycle_args)) => dep_cycle(cycle_args),
+        Some(DepAction::Tree(tree_args)) => dep_tree(tree_args, &tickets),
+        Some(DepAction::Cycle(cycle_args)) => dep_cycle(cycle_args, &tickets),
         None => {
             let id = args
                 .id
@@ -599,9 +599,8 @@ pub fn cmd_edit(args: EditArgs) -> color_eyre::Result<()> {
     Ok(())
 }
 
-pub fn dep_tree(args: DepTreeArgs) -> color_eyre::Result<()> {
-    let tickets = lock_tickets()?;
-    let (tickets, graph) = read_ticket_graph(&tickets, true)?;
+pub fn dep_tree(args: DepTreeArgs, tickets: &[Ticket]) -> color_eyre::Result<()> {
+    let (tickets, graph) = read_ticket_graph(tickets, true)?;
     if tickets.is_empty() {
         return Err(eyre!("Error: ticket not found"));
     }
@@ -674,9 +673,8 @@ pub fn dep_tree(args: DepTreeArgs) -> color_eyre::Result<()> {
     Ok(())
 }
 
-pub fn dep_cycle(args: DepCycleArgs) -> color_eyre::Result<()> {
-    let tickets = lock_tickets()?;
-    let mut cycles = locate_cycles(&tickets, args.include_closed)?;
+pub fn dep_cycle(args: DepCycleArgs, tickets: &[Ticket]) -> color_eyre::Result<()> {
+    let mut cycles = locate_cycles(tickets, args.include_closed)?;
     if cycles.is_empty() {
         println!("No dependency cycles found");
         return Ok(());

@@ -1,4 +1,7 @@
-use std::{collections::HashMap, io};
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
@@ -11,7 +14,7 @@ use ratatui::{
 };
 use tui_tree_widget::{Scrollbar, ScrollbarState, Tree, TreeItem, TreeState};
 
-use crate::Ticket;
+use crate::{Ticket, cli::StatusValue};
 
 #[derive(Debug, Default, PartialEq)]
 enum Focus {
@@ -20,17 +23,27 @@ enum Focus {
     Content,
 }
 
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+enum TicketSelection {
+    #[default]
+    All,
+    Open,
+    InProgress,
+    Closed,
+}
+
 #[derive(Debug, Default)]
-pub struct TuiApp {
-    tickets: Vec<Ticket>,
+pub struct TuiApp<'a> {
+    tickets: &'a [Ticket],
     exit: bool,
     tree_state: TreeState<String>,
     focus: Focus,
+    ticket_selection: TicketSelection,
     content_scroll: u16,
 }
 
-impl TuiApp {
-    pub fn new(tickets: Vec<Ticket>) -> Self {
+impl<'a> TuiApp<'a> {
+    pub fn new(tickets: &'a [Ticket]) -> Self {
         let mut tree_state = TreeState::default();
         tree_state.select_first();
         Self {
@@ -39,6 +52,7 @@ impl TuiApp {
             tree_state,
             focus: Focus::Tickets,
             content_scroll: 0,
+            ..Default::default()
         }
     }
     /// runs the application's main loop until the user quits
@@ -99,6 +113,14 @@ impl TuiApp {
             KeyCode::Left => {
                 self.tree_state.key_left();
             }
+            KeyCode::Char('s') => {
+                self.ticket_selection = match self.ticket_selection {
+                    TicketSelection::All => TicketSelection::Open,
+                    TicketSelection::Open => TicketSelection::InProgress,
+                    TicketSelection::InProgress => TicketSelection::Closed,
+                    TicketSelection::Closed => TicketSelection::All,
+                };
+            }
             _ => {}
         }
         // reset scroll when selection changes
@@ -128,11 +150,12 @@ impl TuiApp {
     }
 }
 
-impl Widget for &mut TuiApp {
+impl<'a> Widget for &mut TuiApp<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let [ticket_window, content_window] =
             Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
-        let items: Vec<TreeItem<String>> = assemble_ticket_tree(&self.tickets).unwrap_or_default();
+        let items: Vec<TreeItem<String>> =
+            assemble_ticket_tree(self.tickets, self.ticket_selection).unwrap_or_default();
         let (ticket_border, content_border) = if self.focus == Focus::Tickets {
             (Style::default().fg(Color::Blue), Style::default())
         } else {
@@ -144,7 +167,15 @@ impl Widget for &mut TuiApp {
             .block(
                 Block::bordered()
                     .border_style(ticket_border)
-                    .title("Tickets [↑/↓ to navigate, →/← to expand/collapse, space to select, Tab to switch focus]"),
+                    .title(format!(
+                        "{} Tickets [↑/↓ to navigate, →/← to expand/collapse, space to select, Tab to switch focus, S to filter]",
+                        match self.ticket_selection {
+                            TicketSelection::All => "All",
+                            TicketSelection::Open => "Open",
+                            TicketSelection::InProgress => "In Progress",
+                            TicketSelection::Closed => "Closed",
+                        }
+                    )),
             )
             .highlight_style(Style::default().bg(Color::Blue))
             .experimental_scrollbar(Some(
@@ -206,18 +237,40 @@ impl Widget for &mut TuiApp {
     }
 }
 
-fn assemble_ticket_tree(tickets: &'_ [Ticket]) -> color_eyre::Result<Vec<TreeItem<'_, String>>> {
+fn assemble_ticket_tree(
+    tickets: &'_ [Ticket],
+    ticket_selection: TicketSelection,
+) -> color_eyre::Result<Vec<TreeItem<'_, String>>> {
     let mut nodes = Vec::new();
     let lookup: HashMap<String, Ticket> = tickets
         .iter()
         .map(|t| (t.id().to_string(), t.clone()))
         .collect();
 
-    for ticket in tickets.iter().cloned() {
+    // Any ticket that is referenced as a dependency (at any level) is not a
+    // root and must only appear nested under its parent, never at the top
+    // level.
+    let dependency_ids: HashSet<String> = tickets
+        .iter()
+        .flat_map(|t| t.deps().iter().cloned())
+        .collect();
+
+    for ticket in tickets.iter().filter(|t| match ticket_selection {
+        TicketSelection::All => true,
+        TicketSelection::Open => t.status() != &StatusValue::Closed,
+        TicketSelection::InProgress => t.status() == &StatusValue::InProgress,
+        TicketSelection::Closed => t.status() == &StatusValue::Closed,
+    }) {
+        if dependency_ids.contains(ticket.id()) {
+            continue;
+        }
+
         let mut item = TreeItem::new_leaf(ticket.id().to_string(), ticket.summary());
 
         if !ticket.deps().is_empty() {
-            add_deps_recursively(&mut item, ticket, &lookup)?;
+            let mut visited = HashSet::new();
+            visited.insert(ticket.id().to_string());
+            add_deps_recursively(&mut item, ticket, &lookup, &mut visited, ticket_selection)?;
         }
 
         nodes.push(item);
@@ -228,14 +281,31 @@ fn assemble_ticket_tree(tickets: &'_ [Ticket]) -> color_eyre::Result<Vec<TreeIte
 
 fn add_deps_recursively(
     item: &mut TreeItem<String>,
-    ticket: Ticket,
+    ticket: &Ticket,
     lookup: &HashMap<String, Ticket>,
+    visited: &mut HashSet<String>,
+    ticket_selection: TicketSelection,
 ) -> color_eyre::Result<()> {
     for dep_id in ticket.deps() {
-        if let Some(dep_ticket) = lookup.get(dep_id).cloned() {
+        // Guard against cycles and repeated dependencies so a ticket is never
+        // inserted more than once within the same branch.
+        if !visited.insert(dep_id.clone()) {
+            continue;
+        }
+
+        if let Some(dep_ticket) = lookup.get(dep_id) {
+            if match ticket_selection {
+                TicketSelection::All => false,
+                TicketSelection::Open => dep_ticket.status() == &StatusValue::Closed,
+                TicketSelection::InProgress => dep_ticket.status() != &StatusValue::InProgress,
+                TicketSelection::Closed => dep_ticket.status() != &StatusValue::Closed,
+            } {
+                continue;
+            }
+
             let mut dep_item =
                 TreeItem::new_leaf(dep_ticket.id().to_string(), dep_ticket.summary());
-            add_deps_recursively(&mut dep_item, dep_ticket, lookup)?;
+            add_deps_recursively(&mut dep_item, dep_ticket, lookup, visited, ticket_selection)?;
             item.add_child(dep_item)?;
         }
     }
