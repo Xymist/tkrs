@@ -1,4 +1,4 @@
-use assert_cmd::{Command, cargo::cargo_bin_cmd};
+use assert_cmd::{cargo::cargo_bin_cmd, Command};
 use assert_fs::TempDir;
 use predicates::prelude::*;
 use std::fs;
@@ -2246,4 +2246,16 @@ fn unlink_warns_when_missing_and_is_idempotent() {
     let after_again_two = fs::read_to_string(&two_path).unwrap();
     assert_eq!(before_again_one, after_again_one);
     assert_eq!(before_again_two, after_again_two);
+}
+
+#[test]
+fn update_help_describes_github_self_update() {
+    let dir = TempDir::new().unwrap();
+    tk_cmd(&dir)
+        .args(["update", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Update tk to the latest release from GitHub",
+        ));
 }

@@ -4,6 +4,7 @@
 
 ### Added
 
+- `tk update` self-updates the binary to the latest GitHub release (via the `self_update` crate over a pure-Rust ureq/rustls stack), installing over the running executable; prints `No new version available` when already current. The command dispatches before the ticket cache refresh, so it never reads or creates a `.tickets/` directory.
 - `tk ls --parent <id>` filters the listing to direct children of the given parent (partial IDs accepted).
 - `tk ls --json` and `tk show --json` now emit a `parents` array (derived from reverse dependencies); `show` also prints a `Parents:` line. Parents are no longer a stored frontmatter field.
 - `tk dep --check-cycle <bool>` is now a toggleable flag (default `true`); pass `--check-cycle false` to skip the cycle guard.

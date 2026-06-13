@@ -75,7 +75,12 @@ pub enum Command {
     AddNote(AddNoteArgs),
     #[command(about = "Output tickets as JSON, optionally filtered")]
     Query(QueryArgs),
+    #[command(about = "Update tk to the latest release from GitHub")]
+    Update(UpdateArgs),
 }
+
+#[derive(Args, Debug)]
+pub struct UpdateArgs {}
 
 #[derive(Args, Debug)]
 pub struct CreateArgs {
@@ -599,6 +604,26 @@ pub fn cmd_edit(args: EditArgs) -> color_eyre::Result<()> {
     if !status.success() {
         return Err(eyre!("editor exited with error"));
     }
+    Ok(())
+}
+
+pub fn cmd_update(_args: UpdateArgs) -> color_eyre::Result<()> {
+    let status = self_update::backends::github::Update::configure()
+        .repo_owner("Xymist")
+        .repo_name("tkrs")
+        .bin_name("tk")
+        .current_version(env!("CARGO_PKG_VERSION"))
+        .show_download_progress(true)
+        .show_output(false)
+        .no_confirm(true)
+        .build()?
+        .update()?;
+
+    match status {
+        self_update::Status::UpToDate(_) => println!("No new version available"),
+        self_update::Status::Updated(version) => println!("Updated to version {version}"),
+    }
+
     Ok(())
 }
 

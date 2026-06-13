@@ -45,11 +45,20 @@ Claude Opus picks it up naturally from there. Other models may need additional g
 - `tk closed` — list recently closed tickets (supports `--limit`, `--since <RFC3339>`, `--assignee`, `--tags`)
 - `tk show|edit|add-note` — inspect and edit tickets (`show` supports `--json` and lists derived `parents`; `add-note` is idempotent on headers and supports `--tag <label>`)
 - `tk query [FILTER]` — output tickets as JSON; supports `--format ndjson|pretty` and built-in filters (`field==value` exact match, `field~substr` contains)
+- `tk update` — self-update `tk` to the latest release published on GitHub, installing it over the running binary; prints `No new version available` when already current
 - `tk tui` — EXPERIMENTAL - Start a TUI for browsing tickets with a little more context than just a bucket of IDs.
 
 ## Release workflow
 
-Pushing a tag matching `vX.Y.Z` triggers the GitHub Actions workflow `.github/workflows/release.yml` to build the Rust binary in release mode and publish a versioned tarball (`tk-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`) as a GitHub release asset. The workflow can also be run manually (`workflow_dispatch`) by providing the tag to build; release creation/uploads now use the GitHub CLI to avoid deprecated `set-output` paths.
+Pushing a tag matching `vX.Y.Z` triggers the GitHub Actions workflow `.github/workflows/release.yml`. It first ensures a GitHub release exists for the tag, then builds the Rust binary in release mode for each supported target and publishes a versioned, per-target tarball as a release asset. The workflow can also be run manually (`workflow_dispatch`) by providing the tag to build.
+
+Built targets and asset names:
+
+- `tk-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` (Linux, x86_64)
+- `tk-vX.Y.Z-aarch64-apple-darwin.tar.gz` (macOS, Apple Silicon)
+- `tk-vX.Y.Z-x86_64-apple-darwin.tar.gz` (macOS, Intel)
+
+`tk update` self-installs by matching the running binary's target triple against these asset names, so each platform pulls its own build automatically.
 
 ## License
 
