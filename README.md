@@ -21,6 +21,14 @@ git clone https://github.com/xymist/tkrs.git
 cd tkrs && cargo install --path .
 ```
 
+**From prebuilt binaries:**
+
+Download the binary for your system from the [latest release](https://github.com/Xymist/tkrs/releases); unpack it, make it executable, and put it somewhere on your PATH
+
+## Upgrade
+
+Run `tk update`; if there is a new version it will download and unpack it over itself.
+
 ## Requirements
 
 `tk` is a Rust binary with no system dependencies.
