@@ -54,9 +54,8 @@ Pushing a tag matching `vX.Y.Z` triggers the GitHub Actions workflow `.github/wo
 
 Built targets and asset names:
 
-- `tk-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` (Linux, x86_64)
+- `tk-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz` (Linux, x86_64; a fully static musl binary with no glibc dependency, so it runs on any x86_64 Linux distribution regardless of GLIBC version)
 - `tk-vX.Y.Z-aarch64-apple-darwin.tar.gz` (macOS, Apple Silicon)
-- `tk-vX.Y.Z-x86_64-apple-darwin.tar.gz` (macOS, Intel)
 
 `tk update` self-installs by matching the running binary's target triple against these asset names, so each platform pulls its own build automatically.
 
