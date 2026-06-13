@@ -5,10 +5,18 @@
 ### Added
 
 - `tk ls --parent <id>` filters the listing to direct children of the given parent (partial IDs accepted).
-- `tk ls --json` output now always includes a `parent` field on every row (null when absent).
+- `tk ls --json` and `tk show --json` now emit a `parents` array (derived from reverse dependencies); `show` also prints a `Parents:` line. Parents are no longer a stored frontmatter field.
+- `tk dep --check-cycle <bool>` is now a toggleable flag (default `true`); pass `--check-cycle false` to skip the cycle guard.
+- `tk create --implementation-plan <text>` populates the implementation-plan section.
+- TUI right-hand pane now shows the selected ticket's status, priority, and assignee in labelled boxes with merged borders across the top, above the content body.
+
+### Changed
+
+- Renamed the `## Design` ticket section to `## Implementation Plan` (JSON key `implementation_plan`); `## Design` is still recognized on read for backward compatibility.
 
 ### Fixed
 
+- `reopen` now clears `closed_at`, and null `Option` frontmatter fields are omitted from serialized output.
 - TUI no longer shows dependency tickets at the top level; tickets referenced as a dependency (at any nesting depth) now appear only nested under their parent.
 
 ## [0.4.0] - 2026-01-27

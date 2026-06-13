@@ -68,7 +68,7 @@ pub fn read_ticket(path: &Path) -> color_eyre::Result<Option<Ticket>> {
     let mut title = String::new();
     let mut section = TicketSection::Description;
     let mut description = String::new();
-    let mut design = String::new();
+    let mut implementation_plan = String::new();
     let mut acceptance = String::new();
     let mut notes = String::new();
 
@@ -84,7 +84,7 @@ pub fn read_ticket(path: &Path) -> color_eyre::Result<Option<Ticket>> {
             || line.starts_with("## Implementation plan")
             || line.starts_with("## Design")
         {
-            section = TicketSection::Design;
+            section = TicketSection::ImplementationPlan;
             continue;
         } else if line.starts_with("## Acceptance Criteria") {
             section = TicketSection::Acceptance;
@@ -96,7 +96,7 @@ pub fn read_ticket(path: &Path) -> color_eyre::Result<Option<Ticket>> {
 
         let target = match section {
             TicketSection::Description => &mut description,
-            TicketSection::Design => &mut design,
+            TicketSection::ImplementationPlan => &mut implementation_plan,
             TicketSection::Acceptance => &mut acceptance,
             TicketSection::Notes => &mut notes,
         };
@@ -120,10 +120,10 @@ pub fn read_ticket(path: &Path) -> color_eyre::Result<Option<Ticket>> {
         } else {
             Some(description.trim().to_string())
         },
-        implementation_plan: if design.is_empty() {
+        implementation_plan: if implementation_plan.is_empty() {
             None
         } else {
-            Some(design.trim().to_string())
+            Some(implementation_plan.trim().to_string())
         },
         acceptance: if acceptance.is_empty() {
             None
@@ -154,9 +154,9 @@ pub fn write_ticket(ticket: &Ticket) -> color_eyre::Result<()> {
         content.push_str(desc);
         content.push_str("\n\n");
     }
-    if let Some(design) = &ticket.design() {
+    if let Some(implementation_plan) = &ticket.implementation_plan() {
         content.push_str("## Implementation Plan\n\n");
-        content.push_str(design);
+        content.push_str(implementation_plan);
         content.push_str("\n\n");
     }
     if let Some(acceptance) = &ticket.acceptance() {

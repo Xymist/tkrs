@@ -8,8 +8,9 @@ use ratatui::{
     DefaultTerminal, Frame,
     buffer::Buffer,
     crossterm,
-    layout::{Constraint, Layout, Margin, Rect},
+    layout::{Constraint, Layout, Margin, Rect, Spacing},
     style::{Color, Style},
+    symbols::merge::MergeStrategy,
     widgets::{Block, Paragraph, ScrollbarOrientation, StatefulWidget, Widget, Wrap},
 };
 use tui_tree_widget::{Scrollbar, ScrollbarState, Tree, TreeItem, TreeState};
@@ -25,8 +26,8 @@ enum Focus {
 
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 enum TicketSelection {
-    #[default]
     All,
+    #[default]
     Open,
     InProgress,
     Closed,
@@ -82,7 +83,7 @@ impl<'a> TuiApp<'a> {
 
     fn handle_key_event(&mut self, key_event: KeyEvent) {
         match key_event.code {
-            KeyCode::Char('q') | KeyCode::Esc => self.exit(),
+            KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => self.exit(),
             KeyCode::Tab => {
                 self.focus = match self.focus {
                     Focus::Tickets => Focus::Content,
@@ -168,7 +169,7 @@ impl<'a> Widget for &mut TuiApp<'a> {
                 Block::bordered()
                     .border_style(ticket_border)
                     .title(format!(
-                        "{} Tickets [↑/↓ to navigate, →/← to expand/collapse, space to select, Tab to switch focus, S to filter]",
+                        "{} Tickets [↑/↓ to navigate, →/← to expand/collapse, Tab to switch focus, S to filter]",
                         match self.ticket_selection {
                             TicketSelection::All => "All",
                             TicketSelection::Open => "Open",
@@ -190,30 +191,70 @@ impl<'a> Widget for &mut TuiApp<'a> {
             &mut self.tree_state,
         );
 
+        let selected_ticket = self
+            .tickets
+            .iter()
+            .find(|t| Some(&t.id().to_string()) == self.tree_state.selected().last());
+
+        let [meta_window, body_window] =
+            Layout::vertical([Constraint::Length(3), Constraint::Fill(1)])
+                .spacing(Spacing::Overlap(1))
+                .areas(content_window);
+
+        let [status_window, priority_window, assignee_window] =
+            Layout::horizontal([Constraint::Fill(1); 3])
+                .spacing(Spacing::Overlap(1))
+                .areas(meta_window);
+
+        let (status_text, priority_text, assignee_text) = match selected_ticket {
+            Some(t) => (
+                t.status().to_string(),
+                format!("P{}", t.priority()),
+                t.assignee().unwrap_or("unassigned").to_string(),
+            ),
+            None => ("-".to_string(), "-".to_string(), "-".to_string()),
+        };
+
+        // Adjacent blocks overlap by one cell (Spacing::Overlap above) and
+        // merge_borders draws the shared edges as proper junctions.
+        let meta_block = |title: &'static str| {
+            Block::bordered()
+                .border_style(content_border)
+                .merge_borders(MergeStrategy::Exact)
+                .title(title)
+        };
+        Paragraph::new(status_text)
+            .block(meta_block("Status"))
+            .render(status_window, buf);
+        Paragraph::new(priority_text)
+            .block(meta_block("Priority"))
+            .render(priority_window, buf);
+        Paragraph::new(assignee_text)
+            .block(meta_block("Assignee"))
+            .render(assignee_window, buf);
+
         let content = Paragraph::new(
-            self.tickets
-                .iter()
-                .find(|t| Some(&t.id().to_string()) == self.tree_state.selected().last())
+            selected_ticket
                 .map(|t| format!("{}", t.body))
                 .unwrap_or("No ticket selected".to_string()),
         )
         .block(
             Block::bordered()
                 .border_style(content_border)
-                .title("Content"),
+                .merge_borders(MergeStrategy::Exact),
         )
         .wrap(Wrap { trim: false })
         .scroll((self.content_scroll, 0));
 
-        let inner_width = content_window.width.saturating_sub(2);
-        let inner_height = content_window.height.saturating_sub(2);
+        let inner_width = body_window.width.saturating_sub(2);
+        let inner_height = body_window.height.saturating_sub(2);
         let total_lines = content.line_count(inner_width) as u16;
         let max_scroll = total_lines.saturating_sub(inner_height);
         self.content_scroll = self.content_scroll.min(max_scroll);
 
         content
             .scroll((self.content_scroll, 0))
-            .render(content_window, buf);
+            .render(body_window, buf);
 
         let mut scrollbar_state = ScrollbarState::new(max_scroll as usize + 1)
             .position(self.content_scroll as usize)
@@ -226,7 +267,7 @@ impl<'a> Widget for &mut TuiApp<'a> {
 
             StatefulWidget::render(
                 scrollbar,
-                content_window.inner(Margin {
+                body_window.inner(Margin {
                     vertical: 1,
                     horizontal: 0,
                 }),

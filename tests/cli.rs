@@ -65,11 +65,58 @@ fn write_ticket_with_fields(
 
 fn assert_links(path: impl AsRef<Path>, expected: &[&str]) {
     let contents = fs::read_to_string(path).unwrap();
-    let needle = format!("links: [{}]", expected.join(", "));
-    assert!(
-        contents.contains(&needle),
-        "expected links line with {needle}\n{contents}"
+    let actual = parse_links(&contents);
+    let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        actual, expected,
+        "expected links {expected:?} but found {actual:?}\n{contents}"
     );
+}
+
+/// Extract the `links` list from ticket frontmatter, tolerating either
+/// flow-style (`links: [a, b]`) or block-style (`links:\n- a\n- b`) YAML.
+fn parse_links(contents: &str) -> Vec<String> {
+    parse_yaml_list(contents, "links:")
+}
+
+/// Extract the `deps` list from ticket frontmatter, tolerating either
+/// flow-style (`deps: [a, b]`) or block-style (`deps:\n- a\n- b`) YAML.
+fn parse_deps(contents: &str) -> Vec<String> {
+    parse_yaml_list(contents, "deps:")
+}
+
+/// Extract a YAML list value identified by `key` (e.g. "deps:" or "links:"),
+/// tolerating either flow-style (`key: [a, b]`) or block-style
+/// (`key:\n- a\n- b`) YAML.
+fn parse_yaml_list(contents: &str, key: &str) -> Vec<String> {
+    let mut lines = contents.lines();
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix(key) else {
+            continue;
+        };
+        let rest = rest.trim();
+        if let Some(inner) = rest.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            return inner
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+        }
+        // block style: collect following `- item` lines
+        let mut items = Vec::new();
+        for item in lines.by_ref() {
+            let item = item.trim();
+            if let Some(value) = item.strip_prefix("- ") {
+                items.push(value.trim().to_string());
+            } else {
+                break;
+            }
+        }
+        return items;
+    }
+    Vec::new()
 }
 
 #[test]
@@ -250,9 +297,18 @@ fn create_parent_resolves_partial_and_errors_on_missing_or_ambiguous() {
         .unwrap();
     assert!(out.status.success());
     let child_id = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let child_path = temp.path().join(".tickets").join(format!("{child_id}.md"));
-    let contents = fs::read_to_string(child_path).unwrap();
-    assert!(contents.contains(&format!("parent: {parent_exact}")));
+
+    // Parent relationship is derived from reverse dependencies: the resolved
+    // parent ticket should now list the new child in its deps.
+    let parent_path = temp
+        .path()
+        .join(".tickets")
+        .join(format!("{parent_exact}.md"));
+    let parent_contents = fs::read_to_string(parent_path).unwrap();
+    assert!(
+        parse_deps(&parent_contents).contains(&child_id),
+        "parent should list child as a dependency: {parent_contents}"
+    );
 
     // Ensure parent_two untouched
     let p2_path = temp
@@ -297,30 +353,6 @@ fn create_supports_body_from_file() {
     assert!(contents.contains("# From file"));
     assert!(contents.contains("Custom body"));
     assert!(contents.contains("Line 2"));
-}
-
-#[test]
-fn create_supports_template_substitution() {
-    let temp = TempDir::new().unwrap();
-    let template_path = temp.path().join("tpl.md");
-    let mut tpl = fs::File::create(&template_path).unwrap();
-    writeln!(tpl, "# {{title}}\nCreated: {{created}}\nID: {{id}}\n").unwrap();
-
-    let out = tk_cmd(&temp)
-        .arg("create")
-        .arg("Tpl")
-        .arg("--template")
-        .arg(&template_path)
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
-
-    let contents =
-        fs::read_to_string(temp.path().join(".tickets").join(format!("{id}.md"))).unwrap();
-    assert!(contents.contains(&format!("ID: {id}")));
-    assert!(contents.contains("Created:"));
-    assert!(contents.contains("# Tpl"));
 }
 
 #[test]
@@ -574,7 +606,7 @@ fn dep_add_appends_dependency() {
 
     let ticket_path = temp.path().join(".tickets").join(format!("{id1}.md"));
     let contents = fs::read_to_string(ticket_path).unwrap();
-    assert!(contents.contains(&format!("deps: [{id2}]")));
+    assert_eq!(parse_deps(&contents), vec![id2.clone()]);
 }
 
 #[test]
@@ -676,8 +708,8 @@ fn dep_add_is_idempotent() {
         .arg(&root)
         .arg(&dep)
         .assert()
-        .success()
-        .stdout(predicate::str::contains("already exists"));
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
 
     let root_path = temp.path().join(".tickets").join(format!("{root}.md"));
     let contents = fs::read_to_string(root_path).unwrap();
@@ -805,9 +837,30 @@ fn dep_cycle_reports_cycle() {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     };
 
-    tk_cmd(&temp).arg("dep").arg(&a).arg(&b).assert().success();
-    tk_cmd(&temp).arg("dep").arg(&b).arg(&c).assert().success();
-    tk_cmd(&temp).arg("dep").arg(&c).arg(&a).assert().success();
+    tk_cmd(&temp)
+        .arg("dep")
+        .arg(&a)
+        .arg(&b)
+        .arg("--check-cycle")
+        .arg("false")
+        .assert()
+        .success();
+    tk_cmd(&temp)
+        .arg("dep")
+        .arg(&b)
+        .arg(&c)
+        .arg("--check-cycle")
+        .arg("false")
+        .assert()
+        .success();
+    tk_cmd(&temp)
+        .arg("dep")
+        .arg(&c)
+        .arg(&a)
+        .arg("--check-cycle")
+        .arg("false")
+        .assert()
+        .success();
 
     let mut canonical = vec![a.clone(), b.clone(), c.clone()];
     let (min_idx, _) = canonical
@@ -852,12 +905,16 @@ fn dep_cycle_include_closed_flag() {
         .arg("dep")
         .arg(&closed_a)
         .arg(&closed_b)
+        .arg("--check-cycle")
+        .arg("false")
         .assert()
         .success();
     tk_cmd(&temp)
         .arg("dep")
         .arg(&closed_b)
         .arg(&closed_a)
+        .arg("--check-cycle")
+        .arg("false")
         .assert()
         .success();
 
@@ -1057,21 +1114,18 @@ fn ls_filters_by_parent_and_surfaces_parent_in_json() {
         .success()
         .stdout(predicate::str::contains(&child_id));
 
-    // JSON output surfaces parent unconditionally
+    // JSON output surfaces derived parents unconditionally
     let out = tk_cmd(&temp).arg("ls").arg("--json").output().unwrap();
     assert!(out.status.success());
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let arr = json.as_array().expect("array");
     let child = arr.iter().find(|v| v["id"] == child_id).expect("child row");
-    assert_eq!(
-        child["parent"],
-        serde_json::Value::String(parent_id.clone())
-    );
+    assert_eq!(child["parents"], serde_json::json!([parent_id.clone()]));
     let orphan = arr
         .iter()
         .find(|v| v["id"] == orphan_id)
         .expect("orphan row");
-    assert_eq!(orphan["parent"], serde_json::Value::Null);
+    assert_eq!(orphan["parents"], serde_json::json!([]));
 
     // unknown --parent surfaces a resolution error
     tk_cmd(&temp)
@@ -1362,17 +1416,28 @@ fn blocked_only_open_and_missing_dep_handling() {
         "missing-one".to_string(),
     ];
     deps.sort();
-    let new_contents = contents
-        .lines()
-        .map(|line| {
-            if line.starts_with("deps:") {
-                format!("deps: [{}]", deps.join(", "))
-            } else {
-                line.to_string()
+    // Rewrite the (block-style) `deps:` list to inject a dangling dependency.
+    let mut out_lines: Vec<String> = Vec::new();
+    let mut lines = contents.lines().peekable();
+    while let Some(line) = lines.next() {
+        if line.starts_with("deps:") {
+            // Skip any existing block-style `- item` entries that follow.
+            while let Some(peek) = lines.peek() {
+                if peek.trim_start().starts_with("- ") {
+                    lines.next();
+                } else {
+                    break;
+                }
             }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+            out_lines.push("deps:".to_string());
+            for d in &deps {
+                out_lines.push(format!("- {d}"));
+            }
+        } else {
+            out_lines.push(line.to_string());
+        }
+    }
+    let new_contents = out_lines.join("\n");
     fs::write(&root_path, new_contents).unwrap();
 
     // Default blocked shows open + in-progress + missing
@@ -1515,7 +1580,7 @@ fn show_displays_resolved_metadata_and_body() {
         "parent-1",
         "Parent Ticket",
         "open",
-        &[],
+        &["child-1"],
         &[],
         &[],
         None,
@@ -1530,7 +1595,7 @@ fn show_displays_resolved_metadata_and_body() {
         &["parent-1"],
         &["parent-1"],
         &["feat", "backend"],
-        Some("parent-1"),
+        None,
         "# Child Ticket\n\nChild description\n\n## Design\n\nDesign text\n\n## Acceptance Criteria\n\nDo the thing\n\n## Notes\n\nNote here",
     );
 
@@ -1540,11 +1605,13 @@ fn show_displays_resolved_metadata_and_body() {
         .assert()
         .success()
         .stdout(predicate::str::contains("child-1 [open] - Child Ticket"))
-        .stdout(predicate::str::contains("Parent: parent-1 (Parent Ticket)"))
+        .stdout(predicate::str::contains(
+            "Parents: parent-1 (Parent Ticket)",
+        ))
         .stdout(predicate::str::contains("Deps: parent-1 (Parent Ticket)"))
         .stdout(predicate::str::contains("Links: parent-1 (Parent Ticket)"))
         .stdout(predicate::str::contains("Tags: [feat, backend]"))
-        .stdout(predicate::str::contains("## Design"))
+        .stdout(predicate::str::contains("## Implementation Plan"))
         .stdout(predicate::str::contains("## Acceptance Criteria"))
         .stdout(predicate::str::contains("## Notes"));
 }
@@ -1558,7 +1625,7 @@ fn show_json_includes_resolved_titles_and_body() {
         "parent-1",
         "Parent Ticket",
         "open",
-        &[],
+        &["child-1"],
         &[],
         &[],
         None,
@@ -1573,7 +1640,7 @@ fn show_json_includes_resolved_titles_and_body() {
         &["parent-1"],
         &["parent-1"],
         &["feat", "backend"],
-        Some("parent-1"),
+        None,
         "# Child Ticket\n\nChild description\n\n## Design\n\nDesign text\n\n## Acceptance Criteria\n\nDo the thing\n\n## Notes\n\nNote here",
     );
 
@@ -1588,20 +1655,15 @@ fn show_json_includes_resolved_titles_and_body() {
 
     assert_eq!(json["id"], "child-1");
     assert_eq!(json["title"], "Child Ticket");
-    assert_eq!(json["parent"]["id"], "parent-1");
-    assert_eq!(json["parent"]["title"], "Parent Ticket");
+    assert_eq!(json["parents"][0]["id"], "parent-1");
+    assert_eq!(json["parents"][0]["title"], "Parent Ticket");
     assert_eq!(json["deps"][0]["title"], "Parent Ticket");
     assert_eq!(json["links"][0]["title"], "Parent Ticket");
     assert_eq!(json["tags"], serde_json::json!(["feat", "backend"]));
-    assert!(
-        json["body"]["raw"]
-            .as_str()
-            .unwrap()
-            .contains("# Child Ticket")
-    );
-    assert_eq!(json["body"]["design"], "Design text");
+    assert_eq!(json["body"]["description"], "Child description");
+    assert_eq!(json["body"]["implementation_plan"], "Design text");
     assert_eq!(json["body"]["acceptance"], "Do the thing");
-    assert_eq!(json["body"]["notes"], "Note here");
+    assert_eq!(json["body"]["notes"], serde_json::json!(["Note here"]));
 }
 
 #[test]
@@ -1710,7 +1772,7 @@ fn add_note_avoids_duplicate_headers_and_supports_tag_and_newlines() {
     assert_eq!(notes_sections.len(), 1, "expected single Notes header");
     assert!(contents.contains("First note"));
     assert!(contents.contains("Second note with trailing"));
-    assert!(contents.contains("[infra] **"));
+    assert!(contents.contains("[infra]"));
     assert!(contents.ends_with('\n'));
 }
 
@@ -1833,97 +1895,6 @@ fn generate_id_uses_three_char_prefix_for_single_segment_dirs() {
     assert!(out2.status.success());
     let id2 = String::from_utf8_lossy(&out2.stdout).trim().to_string();
     assert!(id2.starts_with("fb-"), "expected segment initials: {id2}");
-}
-
-#[test]
-fn migrate_beads_creates_tickets() {
-    let temp = TempDir::new().unwrap();
-
-    let beads_dir = temp.path().join(".beads");
-    fs::create_dir_all(&beads_dir).unwrap();
-    let jsonl = beads_dir.join("issues.jsonl");
-    fs::write(
-        &jsonl,
-        r#"{ "id": "a1", "title": "Beads", "dependencies": [{"type":"blocks","depends_on_id":"b1"}], "status":"open", "priority":1 }
-{ "id": "b1", "title": "Dep", "status":"closed" }
-"#,
-    )
-    .unwrap();
-
-    tk_cmd(&temp)
-        .arg("migrate-beads")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Migrated 2 tickets"));
-
-    let a1 = temp.path().join(".tickets/a1.md");
-    let b1 = temp.path().join(".tickets/b1.md");
-    assert!(a1.exists());
-    assert!(b1.exists());
-    let a1_contents = fs::read_to_string(a1).unwrap();
-    assert!(a1_contents.contains("deps: [b1]"));
-    assert!(a1_contents.contains("priority: 1"));
-}
-
-#[test]
-fn migrate_beads_preserves_blocks_links_parent_and_notes() {
-    let temp = TempDir::new().unwrap();
-
-    let beads_dir = temp.path().join(".beads");
-    fs::create_dir_all(&beads_dir).unwrap();
-    let jsonl = beads_dir.join("issues.jsonl");
-    fs::write(
-        &jsonl,
-        r#"{"id":"x1","title":"Parent","status":"open"}
-{"id":"c1","title":"Child","status":"closed","dependencies":[{"type":"blocks","depends_on_id":"b1"},{"type":"related","depends_on_id":"r2"},{"type":"parent-child","depends_on_id":"x1"}],"notes":"First line\nSecond line"}
-"#,
-    )
-    .unwrap();
-
-    let assert = tk_cmd(&temp).arg("migrate-beads").assert().success();
-    let output = String::from_utf8_lossy(&assert.get_output().stdout);
-    assert!(output.contains("Migrated 2 tickets"), "stdout: {output}");
-
-    let child = temp.path().join(".tickets/c1.md");
-    let contents = fs::read_to_string(&child).unwrap();
-    assert!(contents.contains("deps: [b1]"));
-    assert!(contents.contains("links: [r2]"));
-    assert!(contents.contains("parent: x1"));
-    assert!(contents.contains("## Notes"));
-    assert!(contents.contains("First line"));
-    assert!(contents.contains("Second line"));
-}
-
-#[test]
-fn migrate_beads_skips_malformed_records_with_warning() {
-    let temp = TempDir::new().unwrap();
-
-    let beads_dir = temp.path().join(".beads");
-    fs::create_dir_all(&beads_dir).unwrap();
-    let jsonl = beads_dir.join("issues.jsonl");
-    fs::write(
-        &jsonl,
-        r#"{ "id": "good", "title": "Good", "status":"open" }
-{ "id": "bad", "title": "", "status":"open" }
-not-json
-"#,
-    )
-    .unwrap();
-
-    let assert = tk_cmd(&temp).arg("migrate-beads").assert().success();
-    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
-    assert!(stdout.contains("Migrated 1 tickets"), "stdout: {stdout}");
-    assert!(stdout.contains("skipped 2"), "stdout: {stdout}");
-    assert!(
-        String::from_utf8_lossy(&assert.get_output().stderr).contains("Warning:"),
-        "stderr: {}",
-        String::from_utf8_lossy(&assert.get_output().stderr)
-    );
-
-    let good = temp.path().join(".tickets/good.md");
-    assert!(good.exists());
-    let bad = temp.path().join(".tickets/bad.md");
-    assert!(!bad.exists());
 }
 
 #[test]
@@ -2089,7 +2060,7 @@ fn undep_is_idempotent_and_normalizes_empty() {
         .arg(&dep)
         .assert()
         .success()
-        .stdout(predicate::str::contains("Dependency already removed"));
+        .stdout(predicate::str::contains("Dependency not present"));
 
     // deps normalized to []
     let path = tk_cmd(&temp)

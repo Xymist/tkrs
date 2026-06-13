@@ -85,8 +85,8 @@ pub struct CreateArgs {
     #[arg(short = 'd', long = "description", help = "Description text")]
     description: Option<String>,
 
-    #[arg(long = "design", help = "Design notes")]
-    design: Option<String>,
+    #[arg(long = "implementation-plan", help = "Implementation plan notes")]
+    implementation_plan: Option<String>,
 
     #[arg(long = "acceptance", help = "Acceptance criteria")]
     acceptance: Option<String>,
@@ -254,7 +254,10 @@ pub struct DepArgs {
 
     #[arg(
         long = "check-cycle",
+        num_args = 0..=1,
         default_value_t = true,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
         help = "Detect new dependency cycles after adding and revert if introduced"
     )]
     check_cycle: bool,
@@ -770,6 +773,12 @@ pub fn cmd_ls(args: ListArgs) -> color_eyre::Result<()> {
         let rows: Vec<serde_json::Value> = filtered
             .iter()
             .map(|t| {
+                let mut parents: Vec<String> = tickets
+                    .iter()
+                    .filter(|p| p.deps().iter().any(|d| d == t.id()))
+                    .map(|p| p.id().to_string())
+                    .collect();
+                parents.sort();
                 json!({
                     "id": t.id(),
                     "status": t.status(),
@@ -777,7 +786,8 @@ pub fn cmd_ls(args: ListArgs) -> color_eyre::Result<()> {
                     "deps": t.deps(),
                     "priority": t.priority(),
                     "assignee": t.assignee(),
-                    "tags": t.tags()
+                    "tags": t.tags(),
+                    "parents": parents
                 })
             })
             .collect();
@@ -1054,6 +1064,16 @@ pub fn print_ticket(ticket: &Ticket, lookup: &HashMap<&str, &Ticket>, body: &Tic
         println!("External: {external}");
     }
 
+    let mut parents: Vec<String> = lookup
+        .values()
+        .filter(|p| p.deps().iter().any(|d| d == ticket.id()))
+        .map(|p| format!("{} ({})", p.id(), p.title))
+        .collect();
+    parents.sort();
+    if !parents.is_empty() {
+        println!("Parents: {}", parents.join(", "));
+    }
+
     if ticket.deps().is_empty() {
         println!("Deps: -");
     } else {
@@ -1149,9 +1169,6 @@ pub fn cmd_add_note(args: AddNoteArgs) -> color_eyre::Result<()> {
 
 pub fn cmd_create(args: CreateArgs) -> color_eyre::Result<()> {
     let mut tickets = lock_tickets()?;
-    if tickets.is_empty() {
-        return Err(eyre!("Error: ticket not found"));
-    }
     let tickets_dir = tickets_dir()?;
 
     let title = args.title.trim();
@@ -1213,7 +1230,7 @@ pub fn cmd_create(args: CreateArgs) -> color_eyre::Result<()> {
         },
         body: TicketBody {
             description,
-            implementation_plan: args.design.clone(),
+            implementation_plan: args.implementation_plan.clone(),
             acceptance: args.acceptance.clone(),
             notes: Vec::new(),
         },

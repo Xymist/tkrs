@@ -97,45 +97,10 @@ pub fn resolve_dep_paths<'a>(
 }
 
 pub fn write_ticket_links(path: &Path, links: &[String]) -> color_eyre::Result<()> {
-    let contents = OsFs::read_to_string(path).map_err(|e| eyre!("failed to read ticket: {e}"))?;
-    let mut lines = contents.lines();
-    let mut output = String::new();
-    let mut in_frontmatter = false;
-    let mut links_written = false;
-
-    while let Some(line) = lines.next() {
-        if line.trim() == "---" {
-            if !in_frontmatter {
-                in_frontmatter = true;
-            } else {
-                if !links_written {
-                    output.push_str(&format!("links: [{}]\n", links.join(", ")));
-                }
-                output.push_str("---\n");
-                for rest in lines {
-                    output.push_str(rest);
-                    output.push('\n');
-                }
-                break;
-            }
-            output.push_str("---\n");
-            continue;
-        }
-
-        if in_frontmatter && line.starts_with("links:") {
-            output.push_str(&format!("links: [{}]\n", links.join(", ")));
-            links_written = true;
-        } else {
-            output.push_str(line);
-            output.push('\n');
-        }
-    }
-
-    if !in_frontmatter {
-        return Err(eyre!("ticket missing frontmatter"));
-    }
-
-    OsFs::write(path, output).map_err(|e| eyre!("failed to write ticket: {e}"))?;
+    let mut ticket =
+        read_ticket(path)?.ok_or_else(|| eyre!("ticket not found: {}", path.display()))?;
+    ticket.frontmatter.links = links.to_vec();
+    write_ticket(&ticket)?;
     Ok(())
 }
 
@@ -417,6 +382,19 @@ pub fn ticket_to_json(
         })
         .collect();
 
+    let mut parents: Vec<serde_json::Value> = lookup
+        .values()
+        .filter(|t| t.deps().iter().any(|d| d == ticket.id()))
+        .map(|t| {
+            json!({
+                "id": t.id(),
+                "title": t.title.as_str(),
+                "status": t.status(),
+            })
+        })
+        .collect();
+    parents.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+
     json!({
         "id": ticket.id(),
         "status": ticket.status(),
@@ -426,11 +404,12 @@ pub fn ticket_to_json(
         "tags": ticket.tags(),
         "created": ticket.created(),
         "external_ref": ticket.external_ref(),
+        "parents": parents,
         "deps": deps,
         "links": links,
         "body": {
             "description": body.description,
-            "design": body.implementation_plan,
+            "implementation_plan": body.implementation_plan,
             "acceptance": body.acceptance,
             "notes": body.notes,
         }
@@ -639,6 +618,14 @@ pub fn set_status_with_note(
 
     let tag = Some(format!("status_change: {} -> {}", current_status, status));
     ticket.update_status(status);
+    if status == StatusValue::Closed {
+        let now = OffsetDateTime::now_utc()
+            .format(&format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        ticket.set_closed_at(Some(now));
+    } else {
+        ticket.set_closed_at(None);
+    }
     ticket.add_note(
         note.unwrap_or(&format!("Status updated to {}", status)),
         tag.as_deref(),
@@ -705,6 +692,10 @@ impl Ticket {
         self.frontmatter.status = new_status;
     }
 
+    pub fn set_closed_at(&mut self, value: Option<String>) {
+        self.frontmatter.closed_at = value;
+    }
+
     pub fn add_note(
         &mut self,
         note_text: &str,
@@ -754,6 +745,7 @@ pub struct TicketFrontmatter {
     #[serde(default)]
     tags: Vec<String>,
     created: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     closed_at: Option<String>,
     external_ref: Option<String>,
 }
@@ -816,7 +808,7 @@ impl Display for TicketBody {
 #[derive(Clone, Copy)]
 pub enum TicketSection {
     Description,
-    Design,
+    ImplementationPlan,
     Acceptance,
     Notes,
 }
@@ -877,7 +869,7 @@ impl Ticket {
         self.body.description.as_deref()
     }
 
-    pub fn design(&self) -> Option<&str> {
+    pub fn implementation_plan(&self) -> Option<&str> {
         self.body.implementation_plan.as_deref()
     }
 
