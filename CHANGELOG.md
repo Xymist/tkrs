@@ -15,11 +15,14 @@
 ### Changed
 
 - Renamed the `## Design` ticket section to `## Implementation Plan` (JSON key `implementation_plan`); `## Design` is still recognized on read for backward compatibility.
+- Ticket files are now always written from the full standard template: the lead description and every section heading (`## Implementation Plan`, `## Acceptance Criteria`, `## Notes`) are always present, with a `-` placeholder for any section left empty. `TicketBody`'s `Display` impl is now the single source of truth for the body layout, shared by the on-disk file, `tk show`, and the TUI. A lone `-` is read back as empty, so placeholders round-trip and are replaced (not appended to) by later edits.
 
 ### Fixed
 
 - `reopen` now clears `closed_at`, and null `Option` frontmatter fields are omitted from serialized output.
 - TUI no longer shows dependency tickets at the top level; tickets referenced as a dependency (at any nesting depth) now appear only nested under their parent.
+- `tk show` no longer prints stray trailing whitespace after the `## Notes` section.
+- Multiple notes no longer collapse into a single note when a ticket is re-read (the persisted note separator now matches the parser).
 
 ## [0.4.0] - 2026-01-27
 

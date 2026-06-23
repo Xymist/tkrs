@@ -2987,7 +2987,7 @@ dependencies = [
 
 [[package]]
 name = "ticket"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "assert_cmd",
  "assert_fs",

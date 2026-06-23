@@ -5,7 +5,7 @@ use std::{
 
 use color_eyre::eyre::eyre;
 
-use crate::{Ticket, TicketBody, TicketSection};
+use crate::{SECTION_PLACEHOLDER, Ticket, TicketBody, TicketSection};
 
 pub static TICKETS: Mutex<Vec<Ticket>> = Mutex::new(Vec::new());
 
@@ -52,6 +52,15 @@ pub fn read_all_tickets() -> color_eyre::Result<Vec<Ticket>> {
     }
 
     Ok(tickets)
+}
+
+fn section_value(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == SECTION_PLACEHOLDER {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 pub fn read_ticket(path: &Path) -> color_eyre::Result<Option<Ticket>> {
@@ -115,26 +124,16 @@ pub fn read_ticket(path: &Path) -> color_eyre::Result<Option<Ticket>> {
         )
     })?;
     let body = TicketBody {
-        description: if description.is_empty() {
-            None
-        } else {
-            Some(description.trim().to_string())
-        },
-        implementation_plan: if implementation_plan.is_empty() {
-            None
-        } else {
-            Some(implementation_plan.trim().to_string())
-        },
-        acceptance: if acceptance.is_empty() {
-            None
-        } else {
-            Some(acceptance.trim().to_string())
-        },
-        notes: if notes.is_empty() {
-            Vec::new()
-        } else {
-            notes.split("\n\n").map(|s| s.trim().to_string()).collect()
-        },
+        description: section_value(&description),
+        implementation_plan: section_value(&implementation_plan),
+        acceptance: section_value(&acceptance),
+        notes: section_value(&notes)
+            .map(|n| {
+                n.split("\n\n")
+                    .map(|s| s.trim().to_string())
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default(),
     };
 
     Ok(Some(Ticket {
@@ -149,26 +148,7 @@ pub fn write_ticket(ticket: &Ticket) -> color_eyre::Result<()> {
     let mut content = String::new();
     content.push_str(&ticket.frontmatter.as_yaml()?);
     content.push_str(&format!("# {}\n\n", ticket.title));
-
-    if let Some(desc) = &ticket.description() {
-        content.push_str(desc);
-        content.push_str("\n\n");
-    }
-    if let Some(implementation_plan) = &ticket.implementation_plan() {
-        content.push_str("## Implementation Plan\n\n");
-        content.push_str(implementation_plan);
-        content.push_str("\n\n");
-    }
-    if let Some(acceptance) = &ticket.acceptance() {
-        content.push_str("## Acceptance Criteria\n\n");
-        content.push_str(acceptance);
-        content.push_str("\n\n");
-    }
-    if !ticket.notes().is_empty() {
-        content.push_str("## Notes\n\n");
-        content.push_str(&ticket.notes().join("\n"));
-        content.push('\n');
-    }
+    content.push_str(&ticket.body().to_string());
 
     std::fs::write(&ticket.path, content)?;
 

@@ -759,6 +759,8 @@ impl TicketFrontmatter {
     }
 }
 
+pub const SECTION_PLACEHOLDER: &str = "-";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TicketBody {
     description: Option<String>,
@@ -780,27 +782,21 @@ impl TicketBody {
 
 impl Display for TicketBody {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let description = self.description.as_deref().unwrap_or(SECTION_PLACEHOLDER);
+        let implementation_plan = self
+            .implementation_plan
+            .as_deref()
+            .unwrap_or(SECTION_PLACEHOLDER);
+        let acceptance = self.acceptance.as_deref().unwrap_or(SECTION_PLACEHOLDER);
+        let notes = if self.notes.is_empty() {
+            SECTION_PLACEHOLDER.to_string()
+        } else {
+            self.notes.join("\n\n")
+        };
+
         write!(
             f,
-            r#"
-{}
-
-## Implementation Plan
-
-{}
-
-## Acceptance Criteria
-
-{}
-
-## Notes
-
-{}
-            "#,
-            self.description.as_deref().unwrap_or(""),
-            self.implementation_plan.as_deref().unwrap_or(""),
-            self.acceptance.as_deref().unwrap_or(""),
-            self.notes().join("\n\n"),
+            "{description}\n\n## Implementation Plan\n\n{implementation_plan}\n\n## Acceptance Criteria\n\n{acceptance}\n\n## Notes\n\n{notes}\n"
         )
     }
 }
