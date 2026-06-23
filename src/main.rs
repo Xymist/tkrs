@@ -26,7 +26,20 @@ fn main() -> color_eyre::Result<()> {
     match cli.command {
         Command::Tui => {
             color_eyre::install()?;
-            ratatui::run(|terminal| TuiApp::new(&lock_tickets()?).run(terminal))?
+            let mut terminal = ratatui::init();
+            ratatui::crossterm::execute!(
+                std::io::stdout(),
+                ratatui::crossterm::event::EnableMouseCapture
+            )?;
+            // Bind the result before tearing down so mouse capture is always
+            // disabled and the terminal restored, even when `run` errors.
+            let result = TuiApp::new(&lock_tickets()?).run(&mut terminal);
+            ratatui::crossterm::execute!(
+                std::io::stdout(),
+                ratatui::crossterm::event::DisableMouseCapture
+            )?;
+            ratatui::restore();
+            result?
         }
         Command::Create(args) => cmd_create(args)?,
         Command::Start(args) => cmd_start(args)?,

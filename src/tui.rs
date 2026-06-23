@@ -3,12 +3,14 @@ use std::{
     io,
 };
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::{
     DefaultTerminal, Frame,
     buffer::Buffer,
     crossterm,
-    layout::{Constraint, Layout, Margin, Rect, Spacing},
+    layout::{Constraint, Layout, Margin, Position, Rect, Spacing},
     style::{Color, Style},
     symbols::merge::MergeStrategy,
     widgets::{Block, Paragraph, ScrollbarOrientation, StatefulWidget, Widget, Wrap},
@@ -41,6 +43,8 @@ pub struct TuiApp<'a> {
     focus: Focus,
     ticket_selection: TicketSelection,
     content_scroll: u16,
+    tree_area: Rect,
+    content_area: Rect,
 }
 
 impl<'a> TuiApp<'a> {
@@ -76,6 +80,7 @@ impl<'a> TuiApp<'a> {
             Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
                 self.handle_key_event(key_event)
             }
+            Event::Mouse(mouse_event) => self.handle_mouse_event(mouse_event),
             _ => {}
         };
         Ok(())
@@ -146,6 +151,39 @@ impl<'a> TuiApp<'a> {
         }
     }
 
+    fn handle_mouse_event(&mut self, mouse: MouseEvent) {
+        let pos = Position::new(mouse.column, mouse.row);
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self.tree_area.contains(pos) {
+                    self.focus = Focus::Tickets;
+                    // `click_at` selects the row rendered at this position (if any);
+                    // only reset the body scroll when the selection actually changed.
+                    if self.tree_state.click_at(pos) {
+                        self.content_scroll = 0;
+                    }
+                } else if self.content_area.contains(pos) {
+                    self.focus = Focus::Content;
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if self.content_area.contains(pos) {
+                    self.content_scroll = self.content_scroll.saturating_add(1);
+                } else if self.tree_area.contains(pos) {
+                    self.tree_state.scroll_down(1);
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if self.content_area.contains(pos) {
+                    self.content_scroll = self.content_scroll.saturating_sub(1);
+                } else if self.tree_area.contains(pos) {
+                    self.tree_state.scroll_up(1);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn exit(&mut self) {
         self.exit = true;
     }
@@ -155,6 +193,8 @@ impl<'a> Widget for &mut TuiApp<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let [ticket_window, content_window] =
             Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
+        self.tree_area = ticket_window;
+        self.content_area = content_window;
         let items: Vec<TreeItem<String>> =
             assemble_ticket_tree(self.tickets, self.ticket_selection).unwrap_or_default();
         let (ticket_border, content_border) = if self.focus == Focus::Tickets {
@@ -169,7 +209,7 @@ impl<'a> Widget for &mut TuiApp<'a> {
                 Block::bordered()
                     .border_style(ticket_border)
                     .title(format!(
-                        "{} Tickets [↑/↓ to navigate, →/← to expand/collapse, Tab to switch focus, S to filter]",
+                        "{} Tickets [↑/↓ or click to select, →/← expand/collapse, Tab/click to switch focus, scroll wheel, S to filter]",
                         match self.ticket_selection {
                             TicketSelection::All => "All",
                             TicketSelection::Open => "Open",
@@ -351,4 +391,99 @@ fn add_deps_recursively(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Focus, TuiApp};
+    use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
+
+    // Build an app with a known layout: the left half (cols 0..40) is the
+    // ticket tree, the right half (cols 40..80) is the content pane. These are
+    // normally set during `render`; tests set them directly since they never
+    // draw.
+    fn test_app() -> TuiApp<'static> {
+        let mut app = TuiApp::new(&[]);
+        app.tree_area = Rect::new(0, 0, 40, 24);
+        app.content_area = Rect::new(40, 0, 40, 24);
+        app
+    }
+
+    fn mouse_at(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::empty(),
+        }
+    }
+
+    #[test]
+    fn scroll_down_over_content_increments_scroll() {
+        let mut app = test_app();
+        app.handle_mouse_event(mouse_at(MouseEventKind::ScrollDown, 50, 5));
+        assert_eq!(app.content_scroll, 1);
+    }
+
+    #[test]
+    fn scroll_up_over_content_decrements_scroll() {
+        let mut app = test_app();
+        app.content_scroll = 5;
+        app.handle_mouse_event(mouse_at(MouseEventKind::ScrollUp, 50, 5));
+        assert_eq!(app.content_scroll, 4);
+    }
+
+    #[test]
+    fn scroll_up_over_content_saturates_at_zero() {
+        let mut app = test_app();
+        app.handle_mouse_event(mouse_at(MouseEventKind::ScrollUp, 50, 5));
+        assert_eq!(app.content_scroll, 0);
+    }
+
+    #[test]
+    fn scroll_over_tree_leaves_content_scroll_untouched() {
+        let mut app = test_app();
+        app.handle_mouse_event(mouse_at(MouseEventKind::ScrollDown, 5, 5));
+        assert_eq!(app.content_scroll, 0);
+    }
+
+    #[test]
+    fn scroll_outside_panes_leaves_content_scroll_untouched() {
+        let mut app = test_app();
+        app.handle_mouse_event(mouse_at(MouseEventKind::ScrollDown, 200, 200));
+        assert_eq!(app.content_scroll, 0);
+    }
+
+    #[test]
+    fn left_click_in_content_focuses_content() {
+        let mut app = test_app();
+        assert_eq!(app.focus, Focus::Tickets);
+        app.handle_mouse_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 50, 5));
+        assert_eq!(app.focus, Focus::Content);
+    }
+
+    #[test]
+    fn left_click_in_tree_focuses_tickets() {
+        let mut app = test_app();
+        app.focus = Focus::Content;
+        app.handle_mouse_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 5, 5));
+        assert_eq!(app.focus, Focus::Tickets);
+    }
+
+    #[test]
+    fn left_click_outside_panes_leaves_focus_untouched() {
+        let mut app = test_app();
+        app.focus = Focus::Content;
+        app.handle_mouse_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 200, 200));
+        assert_eq!(app.focus, Focus::Content);
+    }
+
+    #[test]
+    fn right_click_does_not_change_focus() {
+        let mut app = test_app();
+        assert_eq!(app.focus, Focus::Tickets);
+        app.handle_mouse_event(mouse_at(MouseEventKind::Down(MouseButton::Right), 50, 5));
+        assert_eq!(app.focus, Focus::Tickets);
+    }
 }

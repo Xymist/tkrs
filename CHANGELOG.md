@@ -10,6 +10,7 @@
 - `tk dep --check-cycle <bool>` is now a toggleable flag (default `true`); pass `--check-cycle false` to skip the cycle guard.
 - `tk create --implementation-plan <text>` populates the implementation-plan section.
 - TUI right-hand pane now shows the selected ticket's status, priority, and assignee in labelled boxes with merged borders across the top, above the content body.
+- TUI now supports the mouse: click a ticket row to select it, click either pane to focus it, and use the scroll wheel to scroll whichever pane the cursor is over (mouse capture is enabled while the TUI is open and disabled on exit).
 
 ### Changed
 
