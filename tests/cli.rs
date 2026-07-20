@@ -3018,3 +3018,154 @@ fn edit_refuses_read_only_ticket_file() {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
     assert_eq!(ticket_contents(&temp, &id), before, "bytes unchanged");
 }
+
+fn tree_create(dir: &TempDir, title: &str) -> String {
+    let out = tk_cmd(dir).arg("create").arg(title).output().unwrap();
+    assert!(out.status.success(), "create failed: {out:?}");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn tree_create_priority(dir: &TempDir, title: &str, priority: &str) -> String {
+    let out = tk_cmd(dir)
+        .arg("create")
+        .arg(title)
+        .arg("--priority")
+        .arg(priority)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "create failed: {out:?}");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn tree_on_empty_repo_prints_nothing() {
+    let temp = TempDir::new().unwrap();
+    tk_cmd(&temp)
+        .arg("tree")
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+}
+
+#[test]
+fn tree_renders_connectors_and_indentation() {
+    let temp = TempDir::new().unwrap();
+    let r = tree_create(&temp, "Root");
+    let c1 = tree_create(&temp, "Child One");
+    let c2 = tree_create(&temp, "Child Two");
+    let g1 = tree_create(&temp, "Grand One");
+    let g2 = tree_create(&temp, "Grand Two");
+    // R depends on both children; each child owns one grandchild.
+    tk_cmd(&temp).arg("dep").arg(&r).arg(&c1).assert().success();
+    tk_cmd(&temp).arg("dep").arg(&r).arg(&c2).assert().success();
+    tk_cmd(&temp)
+        .arg("dep")
+        .arg(&c1)
+        .arg(&g1)
+        .assert()
+        .success();
+    tk_cmd(&temp)
+        .arg("dep")
+        .arg(&c2)
+        .arg(&g2)
+        .assert()
+        .success();
+
+    // `dep_add` stores deps sorted by id, so order the two branches the same way
+    // to build the expected rendering deterministically.
+    let mut branches = [
+        (c1.clone(), "Child One", g1.clone(), "Grand One"),
+        (c2.clone(), "Child Two", g2.clone(), "Grand Two"),
+    ];
+    branches.sort_by(|a, b| a.0.cmp(&b.0));
+    let (fid, ft, fg, fgt) = &branches[0];
+    let (sid, st, sg, sgt) = &branches[1];
+
+    // Non-last child: `├── ` with a `│   ` continuation into its subtree.
+    // Last child: `└── ` with a four-space continuation. Root carries no glyph.
+    let expected = format!(
+        "[P2] {r}: Root\n├── [P2] {fid}: {ft}\n│   └── [P2] {fg}: {fgt}\n└── [P2] {sid}: {st}\n    └── [P2] {sg}: {sgt}\n"
+    );
+    tk_cmd(&temp)
+        .arg("tree")
+        .assert()
+        .success()
+        .stdout(predicate::eq(expected.as_str()));
+}
+
+#[test]
+fn tree_prints_multiple_roots_at_column_zero() {
+    let temp = TempDir::new().unwrap();
+    let a = tree_create_priority(&temp, "Alpha", "0");
+    let b = tree_create_priority(&temp, "Beta", "1");
+    // Two independent roots, ordered by priority (0 before 1), both at column 0.
+    let expected = format!("[P0] {a}: Alpha\n[P1] {b}: Beta\n");
+    tk_cmd(&temp)
+        .arg("tree")
+        .arg("--status")
+        .arg("all")
+        .assert()
+        .success()
+        .stdout(predicate::eq(expected.as_str()));
+}
+
+#[test]
+fn tree_default_hides_closed_tickets() {
+    let temp = TempDir::new().unwrap();
+    let open = tree_create(&temp, "Still Open");
+    let closed = tree_create(&temp, "Done");
+    tk_cmd(&temp).arg("close").arg(&closed).assert().success();
+
+    tk_cmd(&temp)
+        .arg("tree")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&open))
+        .stdout(predicate::str::contains(&closed).not());
+}
+
+#[test]
+fn tree_status_all_shows_open_and_closed() {
+    let temp = TempDir::new().unwrap();
+    let open = tree_create(&temp, "Still Open");
+    let closed = tree_create(&temp, "Done");
+    tk_cmd(&temp).arg("close").arg(&closed).assert().success();
+
+    tk_cmd(&temp)
+        .arg("tree")
+        .arg("--status")
+        .arg("all")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&open))
+        .stdout(predicate::str::contains(&closed));
+}
+
+#[test]
+fn tree_status_closed_shows_only_closed() {
+    let temp = TempDir::new().unwrap();
+    let open = tree_create(&temp, "Still Open");
+    let closed = tree_create(&temp, "Done");
+    tk_cmd(&temp).arg("close").arg(&closed).assert().success();
+
+    tk_cmd(&temp)
+        .arg("tree")
+        .arg("--status")
+        .arg("closed")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&closed))
+        .stdout(predicate::str::contains(&open).not());
+}
+
+#[test]
+fn tree_rejects_invalid_status_value() {
+    let temp = TempDir::new().unwrap();
+    tk_cmd(&temp)
+        .arg("tree")
+        .arg("--status")
+        .arg("bogus")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid value"));
+}

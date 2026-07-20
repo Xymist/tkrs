@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- `tk tree` prints the full ticket tree, fully expanded, as plain text
+  (`--status all|open|in-progress|closed`, default `open`), reusing the
+  same forest-assembly logic as the `tk tui` tree pane so ordering and
+  nesting stay in sync between the two.
+
 ## [0.8.0] - 2026-07-20
 
 ### Added

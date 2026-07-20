@@ -13,6 +13,7 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::fs::write_ticket;
 use crate::publish::{self, GithubPublishArgs};
+use crate::tree::{TicketSelection, assemble_ticket_forest, print_forest};
 use crate::{
     LinkOp, RemovalOutcome, Ticket, TicketBody, apply_query_filter, build_link_plan, dep_add,
     find_ticket, git_user_name,
@@ -76,6 +77,8 @@ pub enum Command {
     AddNote(AddNoteArgs),
     #[command(about = "Output tickets as JSON, optionally filtered")]
     Query(QueryArgs),
+    #[command(about = "Print the full ticket tree, expanded, as plain text")]
+    Tree(TreeArgs),
     #[command(about = "Publish a ticket to an external tracker")]
     Publish(PublishArgs),
     #[command(about = "Update tk to the latest release from GitHub")]
@@ -496,6 +499,18 @@ pub struct QueryArgs {
         help = "Output format: ndjson (default) or pretty JSON array"
     )]
     format: QueryFormat,
+}
+
+#[derive(Args, Debug)]
+pub struct TreeArgs {
+    #[arg(
+        short = 's',
+        long = "status",
+        value_enum,
+        default_value = "open",
+        help = "Filter tickets and dependencies by status (all|open|in-progress|closed)"
+    )]
+    status: TicketSelection,
 }
 
 /// `tk publish <target>`: nested like `dep`, so further publish targets can
@@ -1331,6 +1346,13 @@ pub fn cmd_query(args: QueryArgs) -> color_eyre::Result<()> {
     } else {
         write_query_output(&items, args.format)
     }
+}
+
+pub fn cmd_tree(args: TreeArgs) -> color_eyre::Result<()> {
+    let tickets = lock_tickets()?;
+    let forest = assemble_ticket_forest(&tickets, args.status);
+    print_forest(&forest);
+    Ok(())
 }
 
 pub fn cmd_add_note(args: AddNoteArgs) -> color_eyre::Result<()> {

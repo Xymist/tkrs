@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    io,
-};
+use std::io;
 
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
@@ -17,22 +14,16 @@ use ratatui::{
 };
 use tui_tree_widget::{Scrollbar, ScrollbarState, Tree, TreeItem, TreeState};
 
-use crate::{Ticket, cli::StatusValue};
+use crate::{
+    Ticket,
+    tree::{TicketNode, TicketSelection, assemble_ticket_forest},
+};
 
 #[derive(Debug, Default, PartialEq)]
 enum Focus {
     #[default]
     Tickets,
     Content,
-}
-
-#[derive(Copy, Clone, Debug, Default, PartialEq)]
-enum TicketSelection {
-    All,
-    #[default]
-    Open,
-    InProgress,
-    Closed,
 }
 
 #[derive(Debug, Default)]
@@ -319,78 +310,21 @@ impl<'a> Widget for &mut TuiApp<'a> {
 }
 
 fn assemble_ticket_tree(
-    tickets: &'_ [Ticket],
+    tickets: &[Ticket],
     ticket_selection: TicketSelection,
-) -> color_eyre::Result<Vec<TreeItem<'_, String>>> {
-    let mut nodes = Vec::new();
-    let lookup: HashMap<String, Ticket> = tickets
+) -> color_eyre::Result<Vec<TreeItem<'static, String>>> {
+    assemble_ticket_forest(tickets, ticket_selection)
         .iter()
-        .map(|t| (t.id().to_string(), t.clone()))
-        .collect();
-
-    // Any ticket that is referenced as a dependency (at any level) is not a
-    // root and must only appear nested under its parent, never at the top
-    // level.
-    let dependency_ids: HashSet<String> = tickets
-        .iter()
-        .flat_map(|t| t.deps().iter().cloned())
-        .collect();
-
-    for ticket in tickets.iter().filter(|t| match ticket_selection {
-        TicketSelection::All => true,
-        TicketSelection::Open => t.status() != &StatusValue::Closed,
-        TicketSelection::InProgress => t.status() == &StatusValue::InProgress,
-        TicketSelection::Closed => t.status() == &StatusValue::Closed,
-    }) {
-        if dependency_ids.contains(ticket.id()) {
-            continue;
-        }
-
-        let mut item = TreeItem::new_leaf(ticket.id().to_string(), ticket.summary());
-
-        if !ticket.deps().is_empty() {
-            let mut visited = HashSet::new();
-            visited.insert(ticket.id().to_string());
-            add_deps_recursively(&mut item, ticket, &lookup, &mut visited, ticket_selection)?;
-        }
-
-        nodes.push(item);
-    }
-
-    Ok(nodes)
+        .map(node_to_tree_item)
+        .collect()
 }
 
-fn add_deps_recursively(
-    item: &mut TreeItem<String>,
-    ticket: &Ticket,
-    lookup: &HashMap<String, Ticket>,
-    visited: &mut HashSet<String>,
-    ticket_selection: TicketSelection,
-) -> color_eyre::Result<()> {
-    for dep_id in ticket.deps() {
-        // Guard against cycles and repeated dependencies so a ticket is never
-        // inserted more than once within the same branch.
-        if !visited.insert(dep_id.clone()) {
-            continue;
-        }
-
-        if let Some(dep_ticket) = lookup.get(dep_id) {
-            if match ticket_selection {
-                TicketSelection::All => false,
-                TicketSelection::Open => dep_ticket.status() == &StatusValue::Closed,
-                TicketSelection::InProgress => dep_ticket.status() != &StatusValue::InProgress,
-                TicketSelection::Closed => dep_ticket.status() != &StatusValue::Closed,
-            } {
-                continue;
-            }
-
-            let mut dep_item =
-                TreeItem::new_leaf(dep_ticket.id().to_string(), dep_ticket.summary());
-            add_deps_recursively(&mut dep_item, dep_ticket, lookup, visited, ticket_selection)?;
-            item.add_child(dep_item)?;
-        }
+fn node_to_tree_item(node: &TicketNode) -> color_eyre::Result<TreeItem<'static, String>> {
+    let mut item = TreeItem::new_leaf(node.id.clone(), node.summary.clone());
+    for child in &node.children {
+        item.add_child(node_to_tree_item(child)?)?;
     }
-    Ok(())
+    Ok(item)
 }
 
 #[cfg(test)]

@@ -21,6 +21,7 @@ pub mod cli;
 pub mod fs;
 pub mod ids;
 pub mod publish;
+pub mod tree;
 pub mod tui;
 
 pub fn dep_add(

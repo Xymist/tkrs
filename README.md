@@ -61,6 +61,13 @@ Claude Opus picks it up naturally from there. Other models may need additional g
   `--print` prints the ticket path; `add-note` is idempotent on headers
   and supports `--tag <label>`)
 - `tk query [FILTER]` — output tickets as JSON; supports `--format ndjson|pretty` and built-in filters (`field==value` exact match, `field~substr` contains)
+- `tk tree` — print the full ticket tree, fully expanded, as plain
+  text (same ordering and nesting as the `tk tui` tree pane, no
+  colour); supports `-s/--status all|open|in-progress|closed` (default
+  `open`); dependencies are omitted from the top level and nest under
+  their dependants instead — a shared dependency can appear under more
+  than one root, but within a single root's tree each ticket is shown
+  only once (at its first occurrence)
 - `tk publish github <id> <owner/repo>` — render a ticket as a GitHub
   issue-form submission and file it with `gh issue create` (nested like
   `dep`, so other publish targets can be added later); supports

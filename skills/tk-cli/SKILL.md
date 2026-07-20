@@ -38,6 +38,9 @@ ID matching works for `show`, `start`, `close`, `edit`, etc.
 - `blocked` -- open/in-progress with unresolved deps
 - `closed` -- recently closed
 - `query [FILTER]` -- tickets as NDJSON or pretty JSON
+- `tree` -- print the full ticket tree, fully expanded, as plain text
+  (`--status all|open|in-progress|closed`, default `open`); mirrors
+  the `tui` tree pane's ordering and nesting
 - `publish github <id> <owner/repo>` -- file the ticket as a GitHub
   issue via `gh` (see the `tk-to-github-issue` skill for the full
   workflow, including the required readability pass)
@@ -223,6 +226,12 @@ own issue forms, and the pinning/re-file semantics.
   per store via `.tickets/.publish.lock`.
 - **No bulk delete**. To abandon a ticket, `tk close` it with a note
   explaining why; don't try to remove the file by hand.
+- **`tk tree` nests dependencies, it doesn't list every ticket at the
+  top level**. A ticket that another ticket depends on is only shown
+  under its dependant(s) -- if two roots share a dependency, it
+  appears under both, but within a single root's tree each ticket is
+  shown only once (at its first occurrence). Use `tk ls` or `tk query`
+  for a flat view of every ticket regardless of dependency shape.
 
 ## When to Dispatch the `@tk-handler` Subagent
 
