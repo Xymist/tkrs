@@ -64,14 +64,17 @@ Claude Opus picks it up naturally from there. Other models may need additional g
 - `tk update` — self-update `tk` to the latest release published on GitHub, installing it over the running binary; prints `No new version available` when already current
 - `tk tui` — EXPERIMENTAL - Start a TUI for browsing tickets with a little more context than just a bucket of IDs. Navigate with the keyboard (↑/↓ to move, →/← to expand/collapse, `Tab` to switch panes, `S` to cycle the status filter, `j`/`k`/PageUp/PageDown to scroll the content) or with the mouse (click a ticket to select it, click a pane to focus it, scroll wheel to scroll whichever pane the cursor is over).
 
-## Agent skill
+## Agent skills
 
-The repo ships a Claude Code skill documenting the CLI for agents,
-under `skills/tk-cli/`. To install it, symlink it into your personal
-skills directory so it stays in lockstep with the checkout:
+The repo ships Claude Code skills for agents under `skills/`:
+`tk-cli` (CLI reference) and `tk-to-github-issue` (convert a ticket
+into a GitHub maintenance issue). To install one, symlink it into
+your personal skills directory so it stays in lockstep with the
+checkout:
 
 ```sh
 ln -s "$(pwd)/skills/tk-cli" ~/.claude/skills/tk-cli
+ln -s "$(pwd)/skills/tk-to-github-issue" ~/.claude/skills/tk-to-github-issue
 ```
 
 ## Release workflow

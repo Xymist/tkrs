@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-07-20
+
+### Added
+
+- The `tk-to-github-issue` Claude Code skill now ships in-repo under
+  `skills/tk-to-github-issue/`, converting a tk ticket into a GitHub
+  issue rendered as an issue-form submission. Ported from the personal
+  skills directory, made project-agnostic (no default assignee;
+  `--title-prefix` and `--fields-json` adapt the body to any repo's
+  issue form; the tk-id leak warning matches any id-shaped reference
+  rather than a hardcoded prefix list), and validated against the
+  v0.7.1 CLI: `external_ref` pinning now goes through
+  `tk edit --external-ref` (direct frontmatter write only as a
+  fallback) and the parser accepts the legacy `## Design` heading.
+  Hardened per review: ids present in the local store hard-fail the
+  publish, pinned tickets refuse re-filing without `--re-file`, and
+  the frontmatter-write fallback runs only when `tk` is absent.
+
 ## [0.7.1] - 2026-07-20
 
 ### Added
