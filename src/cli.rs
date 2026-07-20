@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use color_eyre::eyre::eyre;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -17,8 +17,8 @@ use crate::{
     find_ticket, git_user_name,
     ids::{generate_id, resolve_partial_id},
     lock_tickets, parse_status, read_ticket_graph, remove_dependency, resolve_ticket_path,
-    set_status_with_note, ticket_matches_filters, ticket_to_json, tickets_dir, write_query_output,
-    write_ticket_links,
+    set_status_with_note, ticket_matches_filters, ticket_to_json, tickets_dir,
+    validate_section_value, write_query_output, write_ticket_links,
 };
 use crate::{TicketFrontmatter, locate_cycles};
 
@@ -69,7 +69,7 @@ pub enum Command {
     Closed(ClosedArgs),
     #[command(about = "Display ticket")]
     Show(ShowArgs),
-    #[command(about = "Open ticket in $EDITOR")]
+    #[command(about = "Update ticket sections, or open it in $EDITOR with -i")]
     Edit(EditArgs),
     #[command(about = "Append timestamped note")]
     AddNote(AddNoteArgs),
@@ -201,20 +201,74 @@ pub struct ShowArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(group(
+    ArgGroup::new("edit_mode")
+        .required(true)
+        .multiple(true)
+        .args([
+            "description",
+            "implementation_plan",
+            "acceptance",
+            "external_ref",
+            "body_from_file",
+            "interactive",
+            "print",
+        ])
+))]
 pub struct EditArgs {
     id: String,
 
     #[arg(
+        short = 'd',
+        long = "description",
+        help = "Replace the description section; an empty string clears it"
+    )]
+    description: Option<String>,
+
+    #[arg(
+        long = "implementation-plan",
+        help = "Replace the implementation plan section; an empty string clears it"
+    )]
+    implementation_plan: Option<String>,
+
+    #[arg(
+        long = "acceptance",
+        help = "Replace the acceptance criteria section; an empty string clears it"
+    )]
+    acceptance: Option<String>,
+
+    #[arg(
+        long = "external-ref",
+        help = "Replace the external reference (e.g., gh-123, JIRA-456); an empty string clears it"
+    )]
+    external_ref: Option<String>,
+
+    #[arg(
+        long = "body-from-file",
+        value_name = "PATH",
+        help = "Append body content from file to the description; combine with --description to include both"
+    )]
+    body_from_file: Option<PathBuf>,
+
+    #[arg(
+        short = 'i',
+        long = "interactive",
+        default_value_t = false,
+        help = "Launch $EDITOR to edit the ticket, after applying any update flags"
+    )]
+    interactive: bool,
+
+    #[arg(
         long = "print",
         default_value_t = false,
-        help = "Print the ticket path instead of launching an editor"
+        help = "Print the ticket path; combined with -i, prints instead of opening the editor"
     )]
     print: bool,
 
     #[arg(
         long = "force",
         default_value_t = false,
-        help = "Force launching editor even when stdout is not a TTY"
+        help = "Force launching the editor when stdout is not a TTY; only has effect together with -i"
     )]
     force: bool,
 }
@@ -584,7 +638,108 @@ pub fn cmd_status(args: StatusArgs) -> color_eyre::Result<()> {
     set_status_with_note(&id, status, args.note.as_deref(), &mut tickets)
 }
 
+/// Combines an inline description with file-sourced body content: both trimmed
+/// and joined by a blank line when both are given, either one alone trimmed on
+/// its own, and `None` when neither is given.
+fn merge_description(description: Option<&str>, file_body: Option<&str>) -> Option<String> {
+    match (description, file_body) {
+        (Some(desc), Some(file)) => Some(format!("{}\n\n{}", desc.trim(), file.trim())),
+        (Some(desc), None) => Some(desc.trim().to_string()),
+        (None, Some(file)) => Some(file.trim().to_string()),
+        (None, None) => None,
+    }
+}
+
+/// Interprets a flag value passed to `edit` for replace-or-clear semantics: `None`
+/// means the flag was not passed and the field is left untouched, `Some(None)`
+/// clears the field, and `Some(Some(value))` replaces it with the trimmed value.
+fn section_update(value: Option<&str>) -> Option<Option<String>> {
+    value.map(|v| {
+        let trimmed = v.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn apply_edit_updates(args: &EditArgs) -> color_eyre::Result<()> {
+    let mut tickets = lock_tickets()?;
+    let id = resolve_partial_id(&tickets, &args.id)?;
+
+    let file_body = match args.body_from_file.as_ref() {
+        Some(path) => Some(
+            fs::read_to_string(path)
+                .map_err(|e| eyre!("failed to read body file {}: {e}", path.display()))?,
+        ),
+        None => None,
+    };
+    let merged = merge_description(args.description.as_deref(), file_body.as_deref());
+    let description = merged.filter(|s| !s.trim().is_empty());
+    if let Some(value) = description.as_deref() {
+        validate_section_value(value, "--description/--body-from-file")?;
+    }
+
+    let implementation_plan = section_update(args.implementation_plan.as_deref());
+    if let Some(Some(value)) = &implementation_plan {
+        validate_section_value(value, "--implementation-plan")?;
+    }
+
+    let acceptance = section_update(args.acceptance.as_deref());
+    if let Some(Some(value)) = &acceptance {
+        validate_section_value(value, "--acceptance")?;
+    }
+
+    let external_ref = section_update(args.external_ref.as_deref());
+
+    let ticket = tickets
+        .iter_mut()
+        .find(|t| t.id() == id)
+        .ok_or_else(|| eyre!("Error: ticket '{}' not found", id))?;
+
+    if args.description.is_some() || args.body_from_file.is_some() {
+        ticket.set_description(description)?;
+    }
+
+    if let Some(value) = implementation_plan {
+        ticket.set_implementation_plan(value)?;
+    }
+
+    if let Some(value) = acceptance {
+        ticket.set_acceptance(value)?;
+    }
+
+    if let Some(value) = external_ref {
+        ticket.set_external_ref(value);
+    }
+
+    write_ticket(ticket)?;
+
+    println!("Updated {id}");
+
+    Ok(())
+}
+
 pub fn cmd_edit(args: EditArgs) -> color_eyre::Result<()> {
+    let has_updates = args.description.is_some()
+        || args.implementation_plan.is_some()
+        || args.acceptance.is_some()
+        || args.external_ref.is_some()
+        || args.body_from_file.is_some();
+
+    if has_updates {
+        apply_edit_updates(&args)?;
+    }
+
+    if !args.interactive {
+        if args.print {
+            let path = resolve_ticket_path(&args.id)?;
+            println!("{}", path.display());
+        }
+        return Ok(());
+    }
+
     let path = resolve_ticket_path(&args.id)?;
 
     let stdout_is_tty = io::stdout().is_terminal();
@@ -1200,6 +1355,11 @@ pub fn cmd_create(args: CreateArgs) -> color_eyre::Result<()> {
     if title.is_empty() {
         return Err(eyre!("Title is required"));
     }
+    // The title occupies the single `# ` line of the ticket file; an embedded
+    // newline would let later lines be parsed as section delimiters.
+    if title.contains('\n') {
+        return Err(eyre!("Title must be a single line"));
+    }
     let title = title.to_string();
     let assignee = args.assignee.or_else(git_user_name);
     let parent = if let Some(parent_raw) = args.parent.as_deref() {
@@ -1231,12 +1391,20 @@ pub fn cmd_create(args: CreateArgs) -> color_eyre::Result<()> {
         None
     };
 
-    let description = match (&args.description, &file_body) {
-        (Some(desc), Some(file)) => Some(format!("{}\n\n{}", desc.trim(), file.trim())),
-        (Some(desc), None) => Some(desc.trim().to_string()),
-        (None, Some(file)) => Some(file.trim().to_string()),
-        (None, None) => None,
-    };
+    let description = merge_description(args.description.as_deref(), file_body.as_deref());
+    if let Some(value) = description.as_deref() {
+        validate_section_value(value, "--description/--body-from-file")?;
+    }
+
+    let implementation_plan = args.implementation_plan.as_deref().map(|s| s.trim());
+    if let Some(value) = implementation_plan {
+        validate_section_value(value, "--implementation-plan")?;
+    }
+
+    let acceptance = args.acceptance.as_deref().map(|s| s.trim());
+    if let Some(value) = acceptance {
+        validate_section_value(value, "--acceptance")?;
+    }
 
     let ticket = Ticket {
         title: title.clone(),
@@ -1255,8 +1423,8 @@ pub fn cmd_create(args: CreateArgs) -> color_eyre::Result<()> {
         },
         body: TicketBody {
             description,
-            implementation_plan: args.implementation_plan.clone(),
-            acceptance: args.acceptance.clone(),
+            implementation_plan: implementation_plan.map(str::to_string),
+            acceptance: acceptance.map(str::to_string),
             notes: Vec::new(),
         },
         path: file_path.clone(),
@@ -1270,6 +1438,12 @@ pub fn cmd_create(args: CreateArgs) -> color_eyre::Result<()> {
 
     if let Some(edit) = args.edit.then(|| EditArgs {
         id: id.clone(),
+        description: None,
+        implementation_plan: None,
+        acceptance: None,
+        external_ref: None,
+        body_from_file: None,
+        interactive: true,
         print: false,
         force: false,
     }) {
@@ -1279,4 +1453,65 @@ pub fn cmd_create(args: CreateArgs) -> color_eyre::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{merge_description, section_update};
+
+    // MC/DC for merge_description's match on (description, file_body):
+    //   c1 = description.is_some()
+    //   c2 = file_body.is_some()
+    // All four combinations are distinct outcomes, so every combination is
+    // exercised. Independence pairs (holding the other condition constant):
+    //   c1: (Some, None)=Some vs (None, None)=None  (c2 held None)
+    //   c2: (None, Some)=Some vs (None, None)=None  (c1 held None)
+    // The (Some, Some) merge case is covered explicitly for completeness.
+    #[test]
+    fn merge_description_joins_both_trimmed() {
+        assert_eq!(
+            merge_description(Some("  Intro  "), Some("  Body  ")),
+            Some("Intro\n\nBody".to_string())
+        );
+    }
+
+    #[test]
+    fn merge_description_description_only_isolates_c1() {
+        assert_eq!(
+            merge_description(Some("  Intro  "), None),
+            Some("Intro".to_string())
+        );
+    }
+
+    #[test]
+    fn merge_description_file_only_isolates_c2() {
+        assert_eq!(
+            merge_description(None, Some("  Body  ")),
+            Some("Body".to_string())
+        );
+    }
+
+    #[test]
+    fn merge_description_neither_is_none() {
+        assert_eq!(merge_description(None, None), None);
+    }
+
+    #[test]
+    fn section_update_absent_flag_leaves_untouched() {
+        assert_eq!(section_update(None), None);
+    }
+
+    #[test]
+    fn section_update_empty_value_clears() {
+        assert_eq!(section_update(Some("   ")), Some(None));
+        assert_eq!(section_update(Some("")), Some(None));
+    }
+
+    #[test]
+    fn section_update_nonempty_value_replaces() {
+        assert_eq!(
+            section_update(Some("Replacement")),
+            Some(Some("Replacement".to_string()))
+        );
+    }
 }

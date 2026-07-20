@@ -696,12 +696,50 @@ impl Ticket {
         self.frontmatter.closed_at = value;
     }
 
+    pub fn set_external_ref(&mut self, value: Option<String>) {
+        self.frontmatter.external_ref = value;
+    }
+
+    pub fn set_description(&mut self, value: Option<String>) -> color_eyre::Result<()> {
+        if let Some(v) = &value {
+            validate_section_value(v, "description")?;
+        }
+        self.body.description = value;
+        Ok(())
+    }
+
+    pub fn set_implementation_plan(&mut self, value: Option<String>) -> color_eyre::Result<()> {
+        if let Some(v) = &value {
+            validate_section_value(v, "implementation plan")?;
+        }
+        self.body.implementation_plan = value;
+        Ok(())
+    }
+
+    pub fn set_acceptance(&mut self, value: Option<String>) -> color_eyre::Result<()> {
+        if let Some(v) = &value {
+            validate_section_value(v, "acceptance criteria")?;
+        }
+        self.body.acceptance = value;
+        Ok(())
+    }
+
     pub fn add_note(
         &mut self,
         note_text: &str,
         tag: Option<&str>,
         append_timestamp: bool,
     ) -> color_eyre::Result<()> {
+        reject_reserved_headings(note_text, "note text")?;
+        if let Some(t) = tag {
+            // The tag is interpolated into the note's single `- [tag]` line; an
+            // embedded newline would let the remainder be parsed as a section
+            // delimiter.
+            if t.trim().contains('\n') {
+                return Err(eyre!("note tag must be a single line"));
+            }
+        }
+
         let mut combined = String::new();
         combined.push_str("- ");
 
@@ -747,6 +785,7 @@ pub struct TicketFrontmatter {
     created: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     closed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     external_ref: Option<String>,
 }
 
@@ -760,6 +799,75 @@ impl TicketFrontmatter {
 }
 
 pub const SECTION_PLACEHOLDER: &str = "-";
+
+/// Heading lines that `fs::read_ticket` matches by prefix to switch which
+/// section it is accumulating into. A supplied value containing a line
+/// starting with one of these is indistinguishable from a real section
+/// delimiter, so it would silently split the value across sections (or move
+/// it into the wrong one) the next time the ticket file is read.
+const RESERVED_SECTION_HEADINGS: &[(&str, &str, &str)] = &[
+    (
+        "## Implementation Plan",
+        "Implementation Plan",
+        "--implementation-plan",
+    ),
+    (
+        "## Implementation plan",
+        "Implementation Plan",
+        "--implementation-plan",
+    ),
+    ("## Design", "Implementation Plan", "--implementation-plan"),
+    (
+        "## Acceptance Criteria",
+        "Acceptance Criteria",
+        "--acceptance",
+    ),
+    ("## Notes", "Notes", "`tk add-note`"),
+];
+
+/// Rejects `value` if it contains a line beginning with a reserved section
+/// heading (see [`RESERVED_SECTION_HEADINGS`]). `field` names the flag or
+/// input the value came from, for the error message.
+pub fn reject_reserved_headings(value: &str, field: &str) -> color_eyre::Result<()> {
+    for line in value.lines() {
+        if let Some((heading, section, suggestion)) = RESERVED_SECTION_HEADINGS
+            .iter()
+            .find(|(heading, _, _)| line.starts_with(heading))
+        {
+            return Err(eyre!(
+                "{field} contains a line beginning with the reserved heading \
+                 '{heading}'; the ticket parser treats that as the start of \
+                 the {section} section and would corrupt the ticket on the \
+                 next read. Use {suggestion} to set the {section} section \
+                 directly instead of embedding the heading text."
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Rejects `value` if, once trimmed, it is exactly [`SECTION_PLACEHOLDER`],
+/// which `fs::read_ticket` reads back as an unset section rather than as
+/// literal content.
+pub fn reject_placeholder_value(value: &str, field: &str) -> color_eyre::Result<()> {
+    if value.trim() == SECTION_PLACEHOLDER {
+        return Err(eyre!(
+            "{field} cannot be '{SECTION_PLACEHOLDER}': that value is reserved \
+             as the empty-section placeholder; pass an empty string to clear \
+             the section instead"
+        ));
+    }
+    Ok(())
+}
+
+/// Validates a value destined for a ticket body section (description,
+/// implementation plan, or acceptance criteria): rejects reserved section
+/// headings and the literal placeholder value. See [`reject_reserved_headings`]
+/// and [`reject_placeholder_value`].
+pub fn validate_section_value(value: &str, field: &str) -> color_eyre::Result<()> {
+    reject_reserved_headings(value, field)?;
+    reject_placeholder_value(value, field)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TicketBody {
@@ -979,4 +1087,68 @@ pub fn locate_cycles(
     }
 
     Ok(cycles)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ticket() -> Ticket {
+        Ticket {
+            title: "Test".to_string(),
+            frontmatter: TicketFrontmatter {
+                id: "t-test".to_string(),
+                status: StatusValue::Open,
+                deps: Vec::new(),
+                links: Vec::new(),
+                created: None,
+                r#type: None,
+                priority: 2,
+                assignee: None,
+                external_ref: None,
+                tags: Vec::new(),
+                closed_at: None,
+            },
+            body: TicketBody {
+                description: None,
+                implementation_plan: None,
+                acceptance: None,
+                notes: Vec::new(),
+            },
+            path: std::path::PathBuf::from("t-test.md"),
+        }
+    }
+
+    #[test]
+    fn setters_reject_reserved_heading_values() {
+        let mut t = ticket();
+        assert!(t.set_description(Some("x\n## Notes\ny".into())).is_err());
+        assert!(
+            t.set_implementation_plan(Some("## Acceptance Criteria".into()))
+                .is_err()
+        );
+        assert!(t.set_acceptance(Some("## Design x".into())).is_err());
+        assert!(t.body.description.is_none());
+        assert!(t.body.implementation_plan.is_none());
+        assert!(t.body.acceptance.is_none());
+    }
+
+    #[test]
+    fn setters_reject_placeholder_values() {
+        let mut t = ticket();
+        assert!(t.set_description(Some(" - ".into())).is_err());
+        assert!(t.set_acceptance(Some("-".into())).is_err());
+        assert!(t.body.description.is_none());
+        assert!(t.body.acceptance.is_none());
+    }
+
+    #[test]
+    fn setters_accept_safe_values() {
+        let mut t = ticket();
+        t.set_description(Some("hello".into())).unwrap();
+        t.set_acceptance(Some("### Notes lookalike".into()))
+            .unwrap();
+        assert_eq!(t.body.description.as_deref(), Some("hello"));
+        assert_eq!(t.body.acceptance.as_deref(), Some("### Notes lookalike"));
+    }
 }

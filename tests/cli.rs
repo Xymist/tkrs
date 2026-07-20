@@ -1676,11 +1676,17 @@ fn edit_uses_editor_and_succeeds() {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     };
 
-    // Simulate editor that succeeds and writes nothing
+    // Simulate editor that succeeds and writes nothing. The long-form
+    // --interactive flag selects the editor path; --force launches it even
+    // though stdout is not a TTY. VISUAL is cleared so the EDITOR fallback is
+    // exercised deterministically regardless of the host environment.
     tk_cmd(&temp)
+        .env_remove("VISUAL")
         .env("EDITOR", "true")
         .arg("edit")
         .arg(&id)
+        .arg("--interactive")
+        .arg("--force")
         .assert()
         .success();
 }
@@ -1705,12 +1711,415 @@ fn edit_respects_visual_then_editor_and_print_mode() {
     let printed = String::from_utf8_lossy(&print_out.stdout);
     assert!(printed.contains(&id));
 
-    // VISUAL takes precedence over EDITOR
+    // VISUAL takes precedence over EDITOR. --force launches the editor
+    // even though stdout is not a TTY under the test harness; EDITOR=false
+    // would fail if it were consulted.
     tk_cmd(&temp)
         .env("VISUAL", "printf")
         .env("EDITOR", "false")
         .arg("edit")
         .arg(&id)
+        .arg("-i")
+        .arg("--force")
+        .assert()
+        .success();
+}
+
+fn create_ticket(temp: &TempDir, title: &str) -> String {
+    let out = tk_cmd(temp).arg("create").arg(title).output().unwrap();
+    assert!(out.status.success());
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn ticket_json(temp: &TempDir, id: &str) -> serde_json::Value {
+    let out = tk_cmd(temp)
+        .arg("show")
+        .arg(id)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+fn ticket_contents(temp: &TempDir, id: &str) -> String {
+    fs::read_to_string(temp.path().join(".tickets").join(format!("{id}.md"))).unwrap()
+}
+
+// MC/DC for cmd_edit's `has_updates` decision (src/cli.rs):
+//   args.description.is_some()
+//     || args.implementation_plan.is_some()
+//     || args.acceptance.is_some()
+//     || args.external_ref.is_some()
+//     || args.body_from_file.is_some()
+//   c1 = description.is_some()
+//   c2 = implementation_plan.is_some()
+//   c3 = acceptance.is_some()
+//   c4 = external_ref.is_some()
+//   c5 = body_from_file.is_some()
+// A pure OR chain: the outcome is true iff at least one flag is passed;
+// each single-true case is masked-independent against the all-false case.
+// T0 (all false) = edit_print_alone_prints_path_without_mutation (only --print).
+// Independence pairs (each single-true invocation vs T0):
+//   c1: edit_description_empty_clears_it (its `-d` invocation) vs T0
+//   c2: edit_implementation_plan_updates vs T0
+//   c3: edit_description_updates_and_preserves_other_sections
+//       (its `--acceptance "Must be green"` invocation) vs T0
+//   c4: edit_external_ref_empty_removes_frontmatter_key
+//       (its `--external-ref gh-99` invocation) vs T0
+//   c5: edit_body_from_file_replaces_description vs T0
+// Six cases cover five conditions -- the n+1 minimum.
+//
+// MC/DC for apply_edit_updates' set_description guard (src/cli.rs):
+//   args.description.is_some() || args.body_from_file.is_some()
+//   c1 = description.is_some()
+//   c2 = body_from_file.is_some()
+// This decision is only reached once has_updates is already true, so its
+// (F,F) case is an invocation that passes some other section flag.
+//   (F,F): edit_acceptance_and_external_ref_together (neither -d nor --body-from-file)
+//   (T,F): edit_description_updates_and_preserves_other_sections (its `-d` invocation)
+//   (F,T): edit_body_from_file_replaces_description
+//   (T,T): edit_description_and_body_from_file_merge
+// Independence pairs:
+//   c1: (T,F) vs (F,F)
+//   c2: (F,T) vs (F,F)
+#[test]
+fn edit_bare_requires_a_mode() {
+    let temp = TempDir::new().unwrap();
+    let id = create_ticket(&temp, "Needs a mode");
+
+    tk_cmd(&temp)
+        .arg("edit")
+        .arg(&id)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--interactive"));
+}
+
+#[test]
+fn edit_force_alone_requires_a_mode() {
+    let temp = TempDir::new().unwrap();
+    let id = create_ticket(&temp, "Force needs a mode");
+
+    // --force does not satisfy the required edit-mode group on its own.
+    tk_cmd(&temp)
+        .arg("edit")
+        .arg(&id)
+        .arg("--force")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--interactive"));
+}
+
+#[test]
+fn edit_print_alone_prints_path_without_mutation() {
+    let temp = TempDir::new().unwrap();
+    let id = create_ticket(&temp, "Print Only");
+
+    let before = ticket_contents(&temp, &id);
+
+    let out = tk_cmd(&temp)
+        .arg("edit")
+        .arg(&id)
+        .arg("--print")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let printed = String::from_utf8_lossy(&out.stdout);
+    assert!(printed.contains(&id), "path printed");
+    assert!(!printed.contains("Updated"), "no update confirmation");
+
+    let after = ticket_contents(&temp, &id);
+    assert_eq!(before, after, "ticket file unchanged");
+}
+
+#[test]
+fn edit_description_updates_and_preserves_other_sections() {
+    let temp = TempDir::new().unwrap();
+    let id = create_ticket(&temp, "Describe Me");
+
+    tk_cmd(&temp)
+        .arg("edit")
+        .arg(&id)
+        .arg("--acceptance")
+        .arg("Must be green")
+        .assert()
+        .success();
+
+    let out = tk_cmd(&temp)
+        .arg("edit")
+        .arg(&id)
+        .arg("-d")
+        .arg("Fresh description")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains(&format!("Updated {id}")));
+
+    let json = ticket_json(&temp, &id);
+    assert_eq!(json["body"]["description"], "Fresh description");
+    assert_eq!(json["body"]["acceptance"], "Must be green");
+
+    let contents = ticket_contents(&temp, &id);
+    assert!(contents.contains("## Implementation Plan"));
+    assert!(contents.contains("## Acceptance Criteria"));
+    assert!(contents.contains("## Notes"));
+}
+
+#[test]
+fn edit_description_empty_clears_it() {
+    let temp = TempDir::new().unwrap();
+    let id = create_ticket(&temp, "Clear Me");
+
+    tk_cmd(&temp)
+        .arg("edit")
+        .arg(&id)
+        .arg("-d")
+        .arg("Something to clear")
+        .assert()
+        .success();
+
+    tk_cmd(&temp)
+        .arg("edit")
+        .arg(&id)
+        .arg("-d")
+        .arg("")
+        .assert()
+        .success();
+
+    let json = ticket_json(&temp, &id);
+    assert!(json["body"]["description"].is_null(), "description cleared");
+
+    // The description occupies the untitled space before the first section
+    // heading; when cleared it renders as the `-` placeholder there.
+    let contents = ticket_contents(&temp, &id);
+    let before_impl = contents.split("## Implementation Plan").next().unwrap();
+    assert!(
+        before_impl.trim_end().ends_with('-'),
+        "cleared description renders the placeholder, got: {before_impl:?}"
+    );
+}
+
+#[test]
+fn edit_implementation_plan_updates() {
+    let temp = TempDir::new().unwrap();
+    let id = create_ticket(&temp, "Plan Me");
+
+    let out = tk_cmd(&temp)
+        .arg("edit")
+        .arg(&id)
+        .arg("--implementation-plan")
+        .arg("Do step one, then step two")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains(&format!("Updated {id}")));
+
+    let json = ticket_json(&temp, &id);
+    assert_eq!(
+        json["body"]["implementation_plan"],
+        "Do step one, then step two"
+    );
+    // The implementation-plan-only edit leaves every other section untouched.
+    assert!(json["body"]["description"].is_null());
+    assert!(json["body"]["acceptance"].is_null());
+    assert_eq!(json["body"]["notes"], serde_json::json!([]));
+
+    // All canonical headings remain present on disk so the ticket round-trips.
+    let contents = ticket_contents(&temp, &id);
+    assert!(contents.contains("## Implementation Plan"));
+    assert!(contents.contains("## Acceptance Criteria"));
+    assert!(contents.contains("## Notes"));
+}
+
+#[test]
+fn edit_acceptance_and_external_ref_together() {
+    let temp = TempDir::new().unwrap();
+    let id = create_ticket(&temp, "Two Fields");
+
+    tk_cmd(&temp)
+        .arg("edit")
+        .arg(&id)
+        .arg("--acceptance")
+        .arg("Ship it")
+        .arg("--external-ref")
+        .arg("gh-42")
+        .assert()
+        .success();
+
+    let json = ticket_json(&temp, &id);
+    assert_eq!(json["body"]["acceptance"], "Ship it");
+    assert_eq!(json["external_ref"], "gh-42");
+}
+
+#[test]
+fn edit_external_ref_empty_removes_frontmatter_key() {
+    let temp = TempDir::new().unwrap();
+    let id = create_ticket(&temp, "Ref Removal");
+
+    tk_cmd(&temp)
+        .arg("edit")
+        .arg(&id)
+        .arg("--external-ref")
+        .arg("gh-99")
+        .assert()
+        .success();
+    assert!(ticket_contents(&temp, &id).contains("external_ref: gh-99"));
+
+    tk_cmd(&temp)
+        .arg("edit")
+        .arg(&id)
+        .arg("--external-ref")
+        .arg("")
+        .assert()
+        .success();
+
+    let contents = ticket_contents(&temp, &id);
+    let frontmatter = contents.split("---").nth(1).unwrap();
+    assert!(
+        !frontmatter.contains("external_ref"),
+        "cleared external_ref key is omitted, not serialized as null"
+    );
+
+    // Regression: a freshly created ticket with no --external-ref also omits
+    // the key entirely.
+    let fresh_id = create_ticket(&temp, "No Ref");
+    let fresh = ticket_contents(&temp, &fresh_id);
+    let fresh_fm = fresh.split("---").nth(1).unwrap();
+    assert!(!fresh_fm.contains("external_ref"));
+}
+
+#[test]
+fn edit_body_from_file_replaces_description() {
+    let temp = TempDir::new().unwrap();
+    let id = create_ticket(&temp, "From File");
+
+    let body_path = temp.path().join("body.txt");
+    fs::write(&body_path, "  File-sourced body  \n").unwrap();
+
+    tk_cmd(&temp)
+        .arg("edit")
+        .arg(&id)
+        .arg("--body-from-file")
+        .arg(&body_path)
+        .assert()
+        .success();
+
+    let json = ticket_json(&temp, &id);
+    assert_eq!(json["body"]["description"], "File-sourced body");
+}
+
+#[test]
+fn edit_description_and_body_from_file_merge() {
+    let temp = TempDir::new().unwrap();
+    let id = create_ticket(&temp, "Merge Me");
+
+    let body_path = temp.path().join("body.txt");
+    fs::write(&body_path, "Body paragraph").unwrap();
+
+    tk_cmd(&temp)
+        .arg("edit")
+        .arg(&id)
+        .arg("-d")
+        .arg("Intro")
+        .arg("--body-from-file")
+        .arg(&body_path)
+        .assert()
+        .success();
+
+    let json = ticket_json(&temp, &id);
+    assert_eq!(json["body"]["description"], "Intro\n\nBody paragraph");
+}
+
+#[test]
+fn edit_body_from_file_empty_clears_description() {
+    let temp = TempDir::new().unwrap();
+    let id = create_ticket(&temp, "Empty File");
+
+    tk_cmd(&temp)
+        .arg("edit")
+        .arg(&id)
+        .arg("-d")
+        .arg("Pre-existing")
+        .assert()
+        .success();
+
+    let body_path = temp.path().join("empty.txt");
+    fs::write(&body_path, "   \n").unwrap();
+
+    tk_cmd(&temp)
+        .arg("edit")
+        .arg(&id)
+        .arg("--body-from-file")
+        .arg(&body_path)
+        .assert()
+        .success();
+
+    let json = ticket_json(&temp, &id);
+    assert!(
+        json["body"]["description"].is_null(),
+        "empty file clears description to None"
+    );
+}
+
+#[test]
+fn edit_interactive_with_update_applies_and_prints_path() {
+    let temp = TempDir::new().unwrap();
+    let id = create_ticket(&temp, "Apply Then Editor");
+
+    // Non-TTY under the harness: the editor path prints the path instead of
+    // launching. The update flag is still applied first. EDITOR=false would
+    // fail the command if it were launched.
+    let out = tk_cmd(&temp)
+        .env("EDITOR", "false")
+        .arg("edit")
+        .arg(&id)
+        .arg("-i")
+        .arg("-d")
+        .arg("Applied via interactive")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(&format!("Updated {id}")), "update applied");
+    assert!(stdout.contains(&id), "path printed");
+
+    let json = ticket_json(&temp, &id);
+    assert_eq!(json["body"]["description"], "Applied via interactive");
+}
+
+#[test]
+fn edit_interactive_print_prints_path_without_editor() {
+    let temp = TempDir::new().unwrap();
+    let id = create_ticket(&temp, "Interactive Print");
+
+    // --print short-circuits the editor path; EDITOR=false would fail if run.
+    let out = tk_cmd(&temp)
+        .env("EDITOR", "false")
+        .arg("edit")
+        .arg(&id)
+        .arg("-i")
+        .arg("--print")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains(&id),
+        "path printed"
+    );
+}
+
+#[test]
+fn create_edit_launches_editor_post_create() {
+    let temp = TempDir::new().unwrap();
+
+    // Non-TTY: create --edit reaches the editor path but prints the path
+    // rather than launching. EDITOR=true keeps the exit successful.
+    tk_cmd(&temp)
+        .env("EDITOR", "true")
+        .arg("create")
+        .arg("Create And Edit")
+        .arg("--edit")
         .assert()
         .success();
 }
@@ -2246,6 +2655,272 @@ fn unlink_warns_when_missing_and_is_idempotent() {
     let after_again_two = fs::read_to_string(&two_path).unwrap();
     assert_eq!(before_again_one, after_again_one);
     assert_eq!(before_again_two, after_again_two);
+}
+
+/// Count the `.md` ticket files currently in the temp workspace's `.tickets`
+/// directory, tolerating the directory not existing yet.
+fn ticket_file_count(temp: &TempDir) -> usize {
+    let dir = temp.path().join(".tickets");
+    match fs::read_dir(&dir) {
+        Ok(entries) => entries
+            .flatten()
+            .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
+            .count(),
+        Err(_) => 0,
+    }
+}
+
+#[test]
+fn edit_acceptance_trims_whitespace() {
+    let temp = TempDir::new().unwrap();
+    let id = create_ticket(&temp, "Trim Me");
+
+    tk_cmd(&temp)
+        .arg("edit")
+        .arg(&id)
+        .arg("--acceptance")
+        .arg("  x  ")
+        .assert()
+        .success();
+
+    let json = ticket_json(&temp, &id);
+    assert_eq!(json["body"]["acceptance"], "x");
+}
+
+#[test]
+fn create_rejects_description_with_embedded_reserved_heading() {
+    let temp = TempDir::new().unwrap();
+
+    tk_cmd(&temp)
+        .arg("create")
+        .arg("Sneaky Notes")
+        .arg("-d")
+        .arg("Intro line\n## Notes\nsmuggled note")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("## Notes"));
+
+    assert_eq!(
+        ticket_file_count(&temp),
+        0,
+        "rejected create writes no ticket file"
+    );
+}
+
+#[test]
+fn create_rejects_acceptance_starting_with_reserved_heading() {
+    let temp = TempDir::new().unwrap();
+
+    tk_cmd(&temp)
+        .arg("create")
+        .arg("Design In Acceptance")
+        .arg("--acceptance")
+        .arg("## Design\nlots of detail")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("## Design"));
+
+    assert_eq!(
+        ticket_file_count(&temp),
+        0,
+        "rejected create writes no ticket file"
+    );
+}
+
+#[test]
+fn edit_rejects_implementation_plan_with_reserved_heading() {
+    let temp = TempDir::new().unwrap();
+    let id = create_ticket(&temp, "Plan Guard");
+
+    let before = ticket_contents(&temp, &id);
+
+    tk_cmd(&temp)
+        .arg("edit")
+        .arg(&id)
+        .arg("--implementation-plan")
+        .arg("Step one\n## Acceptance Criteria\nleaked criteria")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("## Acceptance Criteria"));
+
+    assert_eq!(
+        ticket_contents(&temp, &id),
+        before,
+        "rejected edit leaves the ticket file unchanged"
+    );
+}
+
+#[test]
+fn edit_rejects_body_from_file_with_reserved_heading() {
+    let temp = TempDir::new().unwrap();
+    let id = create_ticket(&temp, "File Guard");
+
+    let before = ticket_contents(&temp, &id);
+
+    let body_path = temp.path().join("body.txt");
+    fs::write(&body_path, "Preamble\n## Notes\nnot allowed here\n").unwrap();
+
+    tk_cmd(&temp)
+        .arg("edit")
+        .arg(&id)
+        .arg("--body-from-file")
+        .arg(&body_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("## Notes"));
+
+    assert_eq!(
+        ticket_contents(&temp, &id),
+        before,
+        "rejected body-from-file edit leaves the ticket file unchanged"
+    );
+}
+
+#[test]
+fn add_note_rejects_reserved_heading() {
+    let temp = TempDir::new().unwrap();
+    let id = create_ticket(&temp, "Note Guard");
+
+    let before = ticket_contents(&temp, &id);
+
+    tk_cmd(&temp)
+        .arg("add-note")
+        .arg(&id)
+        .arg("## Notes\nnested heading")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("## Notes"));
+
+    assert_eq!(
+        ticket_contents(&temp, &id),
+        before,
+        "rejected note leaves the ticket file unchanged"
+    );
+}
+
+#[test]
+fn close_note_rejects_reserved_heading() {
+    let temp = TempDir::new().unwrap();
+    let id = create_ticket(&temp, "Close Guard");
+
+    tk_cmd(&temp)
+        .arg("close")
+        .arg(&id)
+        .arg("--note")
+        .arg("## Design\nnot a note")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("## Design"));
+
+    // The shared note path validates before persisting, so the status stays open.
+    let contents = ticket_contents(&temp, &id);
+    assert!(contents.contains("status: open"));
+    assert!(!contents.contains("status: closed"));
+}
+
+#[test]
+fn create_rejects_multiline_title() {
+    let temp = TempDir::new().unwrap();
+
+    tk_cmd(&temp)
+        .arg("create")
+        .arg("Title\n## Notes\ninjected")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("single line"));
+
+    assert_eq!(
+        ticket_file_count(&temp),
+        0,
+        "rejected create writes no ticket file"
+    );
+}
+
+#[test]
+fn add_note_rejects_multiline_tag() {
+    let temp = TempDir::new().unwrap();
+    let id = create_ticket(&temp, "Tag Guard");
+
+    let before = ticket_contents(&temp, &id);
+
+    tk_cmd(&temp)
+        .arg("add-note")
+        .arg(&id)
+        .arg("harmless text")
+        .arg("--tag")
+        .arg("x\n## Acceptance Criteria")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("single line"));
+
+    assert_eq!(
+        ticket_contents(&temp, &id),
+        before,
+        "rejected tag leaves the ticket file unchanged"
+    );
+}
+
+#[test]
+fn create_rejects_literal_dash_acceptance() {
+    let temp = TempDir::new().unwrap();
+
+    tk_cmd(&temp)
+        .arg("create")
+        .arg("Dash Acceptance")
+        .arg("--acceptance")
+        .arg("-")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("'-'"));
+
+    assert_eq!(
+        ticket_file_count(&temp),
+        0,
+        "rejected create writes no ticket file"
+    );
+}
+
+#[test]
+fn edit_rejects_description_trimming_to_dash() {
+    let temp = TempDir::new().unwrap();
+    let id = create_ticket(&temp, "Dash Description");
+
+    let before = ticket_contents(&temp, &id);
+
+    tk_cmd(&temp)
+        .arg("edit")
+        .arg(&id)
+        .arg("-d")
+        .arg(" - ")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("'-'"));
+
+    assert_eq!(
+        ticket_contents(&temp, &id),
+        before,
+        "rejected edit leaves the ticket file unchanged"
+    );
+}
+
+#[test]
+fn create_allows_non_reserved_heading_lookalikes() {
+    let temp = TempDir::new().unwrap();
+
+    // `### Notes` (deeper level) and `Notes:` (no `## ` prefix) do not match a
+    // reserved heading prefix, so they are stored verbatim.
+    let out = tk_cmd(&temp)
+        .arg("create")
+        .arg("Lookalikes")
+        .arg("-d")
+        .arg("### Notes\nNotes: still fine")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    let json = ticket_json(&temp, &id);
+    assert_eq!(json["body"]["description"], "### Notes\nNotes: still fine");
 }
 
 #[test]

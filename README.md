@@ -51,7 +51,15 @@ Claude Opus picks it up naturally from there. Other models may need additional g
 - `tk ls|list` — list tickets with filters (supports `--columns`, `--json`, and `--parent <id>` to scope to direct children of a parent; the `--json` shape always includes a `parents` array derived from reverse dependencies)
 - `tk ready|blocked` — show tickets with dependency readiness (`ready` supports `--status` and `--show-deps`; `blocked` supports `--only-open`)
 - `tk closed` — list recently closed tickets (supports `--limit`, `--since <RFC3339>`, `--assignee`, `--tags`)
-- `tk show|edit|add-note` — inspect and edit tickets (`show` supports `--json` and lists derived `parents`; `add-note` is idempotent on headers and supports `--tag <label>`)
+- `tk show|edit|add-note` — inspect and edit tickets (`show` supports
+  `--json` and lists derived `parents`; `edit` is non-interactive by
+  default and accepts the same section flags as `create`
+  (`-d/--description`, `--implementation-plan`, `--acceptance`,
+  `--external-ref`, `--body-from-file`) to replace a section wholesale,
+  or an empty string to clear it; pass `-i/--interactive` to launch
+  `$EDITOR` instead (combine with update flags to apply them first);
+  `--print` prints the ticket path; `add-note` is idempotent on headers
+  and supports `--tag <label>`)
 - `tk query [FILTER]` — output tickets as JSON; supports `--format ndjson|pretty` and built-in filters (`field==value` exact match, `field~substr` contains)
 - `tk update` — self-update `tk` to the latest release published on GitHub, installing it over the running binary; prints `No new version available` when already current
 - `tk tui` — EXPERIMENTAL - Start a TUI for browsing tickets with a little more context than just a bucket of IDs. Navigate with the keyboard (↑/↓ to move, →/← to expand/collapse, `Tab` to switch panes, `S` to cycle the status filter, `j`/`k`/PageUp/PageDown to scroll the content) or with the mouse (click a ticket to select it, click a pane to focus it, scroll wheel to scroll whichever pane the cursor is over).

@@ -11,15 +11,44 @@
 - `tk create --implementation-plan <text>` populates the implementation-plan section.
 - TUI right-hand pane now shows the selected ticket's status, priority, and assignee in labelled boxes with merged borders across the top, above the content body.
 - TUI now supports the mouse: click a ticket row to select it, click either pane to focus it, and use the scroll wheel to scroll whichever pane the cursor is over (mouse capture is enabled while the TUI is open and disabled on exit).
+- `tk edit` accepts the same section-update flags as `create`
+  (`-d/--description`, `--implementation-plan`, `--acceptance`,
+  `--external-ref`, `--body-from-file`) to replace a ticket's fields
+  non-interactively; passing an empty string clears the field.
+  `--description` and `--body-from-file` combine the same way they do
+  in `create`.
+- `tk create`, `tk edit`, and `tk add-note` reject description,
+  implementation-plan, acceptance, and note values that contain a line
+  beginning with a reserved section heading (`## Implementation Plan`,
+  `## Implementation plan`, `## Design`, `## Acceptance Criteria`,
+  `## Notes`), since such a line would be mistaken for a real section
+  delimiter and split the value across sections on the next read.
+- `tk create` and `tk edit` reject a description, implementation-plan,
+  or acceptance value that is exactly `-`, since that string is the
+  reserved placeholder for an empty section; pass an empty string to
+  clear a section instead.
+- `tk create` requires a single-line title and `tk add-note --tag` a
+  single-line tag; both occupy one structural line of the ticket file,
+  so an embedded newline could smuggle in a section delimiter.
 
 ### Changed
 
 - Renamed the `## Design` ticket section to `## Implementation Plan` (JSON key `implementation_plan`); `## Design` is still recognized on read for backward compatibility.
 - Ticket files are now always written from the full standard template: the lead description and every section heading (`## Implementation Plan`, `## Acceptance Criteria`, `## Notes`) are always present, with a `-` placeholder for any section left empty. `TicketBody`'s `Display` impl is now the single source of truth for the body layout, shared by the on-disk file, `tk show`, and the TUI. A lone `-` is read back as empty, so placeholders round-trip and are replaced (not appended to) by later edits.
+- `tk edit` is non-interactive by default; launching `$EDITOR`/`$VISUAL`
+  now requires `-i/--interactive`. Running `tk edit <id>` with no flags
+  is a usage error; combine `-i` with update flags to apply them before
+  opening the editor.
 
 ### Fixed
 
 - `reopen` now clears `closed_at`, and null `Option` frontmatter fields are omitted from serialized output.
+- A cleared `external_ref` is now omitted from serialized frontmatter
+  instead of writing `external_ref: null`, matching the other optional
+  frontmatter fields.
+- `tk edit --implementation-plan`/`--acceptance` and `tk create`'s
+  equivalents now trim stored values, matching `--description`'s
+  existing behaviour so all sections trim consistently.
 - TUI no longer shows dependency tickets at the top level; tickets referenced as a dependency (at any nesting depth) now appear only nested under their parent.
 - `tk show` no longer prints stray trailing whitespace after the `## Notes` section.
 - Multiple notes no longer collapse into a single note when a ticket is re-read (the persisted note separator now matches the parser).
