@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-07-20
+
+### Added
+
+- The `tk-cli` Claude Code agent skill now ships in-repo under
+  `skills/tk-cli/`, documenting the CLI (including the v0.7.0
+  non-interactive `tk edit`) for agents; install it by symlinking
+  into `~/.claude/skills/` (see README).
+
+## [0.7.0] - 2026-07-20
+
+Accumulated changes from v0.5.0 through v0.7.0.
+
 ### Added
 
 - `tk update` self-updates the binary to the latest GitHub release (via the `self_update` crate over a pure-Rust ureq/rustls stack), installing over the running executable; prints `No new version available` when already current. The command dispatches before the ticket cache refresh, so it never reads or creates a `.tickets/` directory.

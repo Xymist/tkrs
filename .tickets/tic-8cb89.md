@@ -1,13 +1,14 @@
 ---
 id: tic-8cb89
 type: task
-status: open
+status: closed
 deps: []
 links: []
 priority: 2
 assignee: Xymist
 tags: []
 created: 2026-07-20T11:15:23.226210308Z
+closed_at: 2026-07-20T14:09:43.83249609Z
 external_ref: null
 ---
 # Distribute the tk-cli agent skill from this repo
@@ -24,4 +25,6 @@ Skill content lives in-repo and accurately describes the v0.7.0 CLI surface; ~/.
 
 ## Notes
 
--
+- Skill moved in-repo at skills/tk-cli/SKILL.md, rewritten for v0.7.0 edit behaviour (stale --design flag fixed, validation gotchas documented); ~/.claude/skills/tk-cli is now a symlink to it; README documents installation. Shipping as v0.7.1. @ 2026-07-20 14:09:43 UTC
+
+- [status_change: open -> closed] Status updated to closed @ 2026-07-20 14:09:43 UTC
