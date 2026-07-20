@@ -3169,3 +3169,97 @@ fn tree_rejects_invalid_status_value() {
         .failure()
         .stderr(predicate::str::contains("invalid value"));
 }
+
+#[test]
+fn tree_inverted_makes_leaves_roots_with_epic_nested() {
+    let temp = TempDir::new().unwrap();
+    let a = tree_create(&temp, "Leaf A");
+    let b = tree_create(&temp, "Leaf B");
+    let e = tree_create(&temp, "Epic");
+    // Epic depends on both leaves.
+    tk_cmd(&temp).arg("dep").arg(&e).arg(&a).assert().success();
+    tk_cmd(&temp).arg("dep").arg(&e).arg(&b).assert().success();
+
+    // Roots and `dep_add`-sorted deps both order by id; sort the leaves to
+    // build the expected rendering deterministically.
+    let mut leaves = [(a.clone(), "Leaf A"), (b.clone(), "Leaf B")];
+    leaves.sort_by(|x, y| x.0.cmp(&y.0));
+    let (fid, ft) = &leaves[0];
+    let (sid, st) = &leaves[1];
+
+    // Default (normal): the epic is the root with both leaves nested under it.
+    let normal_expected = format!("[P2] {e}: Epic\n├── [P2] {fid}: {ft}\n└── [P2] {sid}: {st}\n");
+    tk_cmd(&temp)
+        .arg("tree")
+        .assert()
+        .success()
+        .stdout(predicate::eq(normal_expected.as_str()));
+
+    // Inverted: each leaf is a column-0 root with the epic nested via `└── `,
+    // roots ordered by priority then id (all equal priority here).
+    let inverted_expected =
+        format!("[P2] {fid}: {ft}\n└── [P2] {e}: Epic\n[P2] {sid}: {st}\n└── [P2] {e}: Epic\n");
+    tk_cmd(&temp)
+        .arg("tree")
+        .arg("--inverted")
+        .assert()
+        .success()
+        .stdout(predicate::eq(inverted_expected.as_str()));
+}
+
+#[test]
+fn tree_inverted_composes_with_status_filter() {
+    let temp = TempDir::new().unwrap();
+    let l = tree_create(&temp, "Leaf");
+    let e = tree_create(&temp, "Epic");
+    tk_cmd(&temp).arg("dep").arg(&e).arg(&l).assert().success();
+    tk_cmd(&temp).arg("close").arg(&e).assert().success();
+
+    // Default open selection prunes the closed epic; the leaf stands alone.
+    let open_expected = format!("[P2] {l}: Leaf\n");
+    tk_cmd(&temp)
+        .arg("tree")
+        .arg("--inverted")
+        .assert()
+        .success()
+        .stdout(predicate::eq(open_expected.as_str()));
+
+    // `--status all` brings the closed epic back, nested under the leaf.
+    let all_expected = format!("[P2] {l}: Leaf\n└── [P2] {e}: Epic\n");
+    tk_cmd(&temp)
+        .arg("tree")
+        .arg("--inverted")
+        .arg("--status")
+        .arg("all")
+        .assert()
+        .success()
+        .stdout(predicate::eq(all_expected.as_str()));
+}
+
+#[test]
+fn tree_inverted_multi_level_glyphs_match_normal() {
+    let temp = TempDir::new().unwrap();
+    let l = tree_create(&temp, "Leaf");
+    let m = tree_create(&temp, "Mid");
+    let e = tree_create(&temp, "Epic");
+    // Chain: epic -> mid -> leaf (mid depends on leaf, epic depends on mid).
+    tk_cmd(&temp).arg("dep").arg(&m).arg(&l).assert().success();
+    tk_cmd(&temp).arg("dep").arg(&e).arg(&m).assert().success();
+
+    // Normal: epic root, single-child chain down to the leaf.
+    let normal_expected = format!("[P2] {e}: Epic\n└── [P2] {m}: Mid\n    └── [P2] {l}: Leaf\n");
+    tk_cmd(&temp)
+        .arg("tree")
+        .assert()
+        .success()
+        .stdout(predicate::eq(normal_expected.as_str()));
+
+    // Inverted: leaf root, chain reversed up to the epic, identical glyphs.
+    let inverted_expected = format!("[P2] {l}: Leaf\n└── [P2] {m}: Mid\n    └── [P2] {e}: Epic\n");
+    tk_cmd(&temp)
+        .arg("tree")
+        .arg("--inverted")
+        .assert()
+        .success()
+        .stdout(predicate::eq(inverted_expected.as_str()));
+}

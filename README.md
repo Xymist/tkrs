@@ -67,7 +67,10 @@ Claude Opus picks it up naturally from there. Other models may need additional g
   `open`); dependencies are omitted from the top level and nest under
   their dependants instead — a shared dependency can appear under more
   than one root, but within a single root's tree each ticket is shown
-  only once (at its first occurrence)
+  only once (at its first occurrence); `--inverted` walks the reversed
+  graph instead — roots are leaf work items with no resolvable
+  dependency, and each node nests the tickets that depend on it, so an
+  epic reachable from several leaves appears once per path
 - `tk publish github <id> <owner/repo>` — render a ticket as a GitHub
   issue-form submission and file it with `gh issue create` (nested like
   `dep`, so other publish targets can be added later); supports

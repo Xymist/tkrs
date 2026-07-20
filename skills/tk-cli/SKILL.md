@@ -40,7 +40,8 @@ ID matching works for `show`, `start`, `close`, `edit`, etc.
 - `query [FILTER]` -- tickets as NDJSON or pretty JSON
 - `tree` -- print the full ticket tree, fully expanded, as plain text
   (`--status all|open|in-progress|closed`, default `open`); mirrors
-  the `tui` tree pane's ordering and nesting
+  the `tui` tree pane's ordering and nesting; `--inverted` walks the
+  reversed graph, rooting at leaf work items and nesting dependants
 - `publish github <id> <owner/repo>` -- file the ticket as a GitHub
   issue via `gh` (see the `tk-to-github-issue` skill for the full
   workflow, including the required readability pass)
@@ -232,6 +233,9 @@ own issue forms, and the pinning/re-file semantics.
   appears under both, but within a single root's tree each ticket is
   shown only once (at its first occurrence). Use `tk ls` or `tk query`
   for a flat view of every ticket regardless of dependency shape.
+  `--inverted` flips the same nesting rule around dependants instead
+  of dependencies, so an epic reachable from several leaf tickets
+  repeats once per work path.
 
 ## When to Dispatch the `@tk-handler` Subagent
 

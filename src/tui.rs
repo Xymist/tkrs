@@ -16,7 +16,7 @@ use tui_tree_widget::{Scrollbar, ScrollbarState, Tree, TreeItem, TreeState};
 
 use crate::{
     Ticket,
-    tree::{TicketNode, TicketSelection, assemble_ticket_forest},
+    tree::{Orientation, TicketNode, TicketSelection, assemble_ticket_forest},
 };
 
 #[derive(Debug, Default, PartialEq)]
@@ -313,7 +313,7 @@ fn assemble_ticket_tree(
     tickets: &[Ticket],
     ticket_selection: TicketSelection,
 ) -> color_eyre::Result<Vec<TreeItem<'static, String>>> {
-    assemble_ticket_forest(tickets, ticket_selection)
+    assemble_ticket_forest(tickets, ticket_selection, Orientation::Normal)
         .iter()
         .map(node_to_tree_item)
         .collect()

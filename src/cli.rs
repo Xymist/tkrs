@@ -13,7 +13,7 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::fs::write_ticket;
 use crate::publish::{self, GithubPublishArgs};
-use crate::tree::{TicketSelection, assemble_ticket_forest, print_forest};
+use crate::tree::{Orientation, TicketSelection, assemble_ticket_forest, print_forest};
 use crate::{
     LinkOp, RemovalOutcome, Ticket, TicketBody, apply_query_filter, build_link_plan, dep_add,
     find_ticket, git_user_name,
@@ -511,6 +511,12 @@ pub struct TreeArgs {
         help = "Filter tickets and dependencies by status (all|open|in-progress|closed)"
     )]
     status: TicketSelection,
+
+    #[arg(
+        long = "inverted",
+        help = "Walk the reversed dependency graph: roots are leaf work items, children are dependants"
+    )]
+    inverted: bool,
 }
 
 /// `tk publish <target>`: nested like `dep`, so further publish targets can
@@ -1350,7 +1356,12 @@ pub fn cmd_query(args: QueryArgs) -> color_eyre::Result<()> {
 
 pub fn cmd_tree(args: TreeArgs) -> color_eyre::Result<()> {
     let tickets = lock_tickets()?;
-    let forest = assemble_ticket_forest(&tickets, args.status);
+    let orientation = if args.inverted {
+        Orientation::Inverted
+    } else {
+        Orientation::Normal
+    };
+    let forest = assemble_ticket_forest(&tickets, args.status, orientation);
     print_forest(&forest);
     Ok(())
 }

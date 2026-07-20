@@ -8,6 +8,9 @@
   (`--status all|open|in-progress|closed`, default `open`), reusing the
   same forest-assembly logic as the `tk tui` tree pane so ordering and
   nesting stay in sync between the two.
+- `tk tree --inverted` walks the reversed dependency graph: roots are
+  leaf work items with no resolvable dependency, and each node nests
+  its dependants, so indentation grows toward the epic(s) it feeds.
 
 ## [0.8.0] - 2026-07-20
 

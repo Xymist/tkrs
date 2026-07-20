@@ -3,6 +3,8 @@
 //! Both the TUI's tree pane and `tk tree` build the same forest: dependencies
 //! nest under every ticket that depends on them and are omitted from the top
 //! level, so the two stay visually consistent without duplicating the walk.
+//! `tk tree` can additionally walk the reversed graph (see [`Orientation`]);
+//! the TUI always uses the normal orientation.
 
 use std::collections::{HashMap, HashSet};
 
@@ -30,12 +32,37 @@ pub struct TicketNode {
     pub children: Vec<TicketNode>,
 }
 
-/// Builds the forest of ticket trees: a ticket is a root unless some other
-/// ticket lists it as a dependency, in which case it appears only nested
-/// under its dependant(s). Within a single root's branch, a `visited` guard
-/// prevents the same dependency id from being added twice, which also covers
-/// dependency cycles.
-pub fn assemble_ticket_forest(tickets: &[Ticket], selection: TicketSelection) -> Vec<TicketNode> {
+/// Which direction a ticket forest is assembled in.
+///
+/// `Normal` nests each ticket's dependencies under it, so a root is a
+/// ticket no other ticket depends on. `Inverted` nests each ticket's
+/// dependants under it instead, so a root is a ticket with no resolvable
+/// dependency of its own (a leaf work item), and indentation grows toward
+/// the epics that depend on it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Orientation {
+    Normal,
+    Inverted,
+}
+
+/// Builds the forest of ticket trees for the given `orientation`. Root
+/// eligibility and the parent/child edge direction are both taken from the
+/// unfiltered dependency graph before `selection` is applied:
+///
+/// - `Normal`: a ticket is a root unless some other ticket lists it as a
+///   dependency; children of a node are its resolvable dependencies.
+/// - `Inverted`: a ticket is a root if it has no resolvable dependency of
+///   its own (its `deps()` is empty, or none of its dep ids resolve to a
+///   ticket in the slice); children of a node are the tickets that depend
+///   on it.
+///
+/// Within a single root's branch, a `visited` guard prevents the same
+/// ticket id from being added twice, which also covers dependency cycles.
+pub fn assemble_ticket_forest(
+    tickets: &[Ticket],
+    selection: TicketSelection,
+    orientation: Orientation,
+) -> Vec<TicketNode> {
     let lookup: HashMap<&str, &Ticket> = tickets.iter().map(|t| (t.id(), t)).collect();
 
     let dependency_ids: HashSet<&str> = tickets
@@ -43,49 +70,103 @@ pub fn assemble_ticket_forest(tickets: &[Ticket], selection: TicketSelection) ->
         .flat_map(|t| t.deps().iter().map(String::as_str))
         .collect();
 
+    let source = match orientation {
+        Orientation::Normal => ChildSource::Deps(&lookup),
+        Orientation::Inverted => ChildSource::Dependants(build_inverted_adjacency(tickets)),
+    };
+
     tickets
         .iter()
         .filter(|t| matches_selection(t, selection))
-        .filter(|t| !dependency_ids.contains(t.id()))
+        .filter(|t| is_root(t, orientation, &dependency_ids, &lookup))
         .map(|ticket| {
             let mut visited = HashSet::new();
             visited.insert(ticket.id().to_string());
             TicketNode {
                 id: ticket.id().to_string(),
                 summary: ticket.summary(),
-                children: deps_recursively(ticket, &lookup, &mut visited, selection),
+                children: children_recursively(ticket, &source, &mut visited, selection),
             }
         })
         .collect()
 }
 
-fn deps_recursively(
+/// Where a node's children come from during the walk. Normal children are
+/// read from the ticket's own `deps()` rather than an id-keyed map so that
+/// tickets sharing a duplicate id each keep their own dependency list.
+enum ChildSource<'a> {
+    Deps(&'a HashMap<&'a str, &'a Ticket>),
+    Dependants(HashMap<&'a str, Vec<&'a Ticket>>),
+}
+
+impl<'a> ChildSource<'a> {
+    /// Resolvable children of `ticket`, in `deps()` order (`Deps`) or input
+    /// slice order (`Dependants`).
+    fn children_of(&self, ticket: &'a Ticket) -> Vec<&'a Ticket> {
+        match self {
+            ChildSource::Deps(lookup) => ticket
+                .deps()
+                .iter()
+                .filter_map(|dep_id| lookup.get(dep_id.as_str()).copied())
+                .collect(),
+            ChildSource::Dependants(adjacency) => {
+                adjacency.get(ticket.id()).cloned().unwrap_or_default()
+            }
+        }
+    }
+}
+
+/// Adjacency for the inverted orientation: each ticket maps to its
+/// dependants, in input slice order (a dependant is pushed onto every
+/// dependency it names, in the order it is visited).
+fn build_inverted_adjacency(tickets: &[Ticket]) -> HashMap<&str, Vec<&Ticket>> {
+    let mut adjacency: HashMap<&str, Vec<&Ticket>> = HashMap::new();
+    for ticket in tickets {
+        for dep_id in ticket.deps() {
+            adjacency.entry(dep_id.as_str()).or_default().push(ticket);
+        }
+    }
+    adjacency
+}
+
+fn is_root(
     ticket: &Ticket,
+    orientation: Orientation,
+    dependency_ids: &HashSet<&str>,
     lookup: &HashMap<&str, &Ticket>,
+) -> bool {
+    match orientation {
+        Orientation::Normal => !dependency_ids.contains(ticket.id()),
+        Orientation::Inverted => !ticket
+            .deps()
+            .iter()
+            .any(|dep_id| lookup.contains_key(dep_id.as_str())),
+    }
+}
+
+fn children_recursively<'a>(
+    ticket: &'a Ticket,
+    source: &ChildSource<'a>,
     visited: &mut HashSet<String>,
     selection: TicketSelection,
 ) -> Vec<TicketNode> {
     let mut children = Vec::new();
 
-    for dep_id in ticket.deps() {
-        // Guard against cycles and repeated dependencies so a ticket is never
+    for child in source.children_of(ticket) {
+        // Guard against cycles and repeated edges so a ticket is never
         // inserted more than once within the same branch.
-        if !visited.insert(dep_id.clone()) {
+        if !visited.insert(child.id().to_string()) {
             continue;
         }
 
-        let Some(dep_ticket) = lookup.get(dep_id.as_str()) else {
-            continue;
-        };
-
-        if !matches_selection(dep_ticket, selection) {
+        if !matches_selection(child, selection) {
             continue;
         }
 
         children.push(TicketNode {
-            id: dep_ticket.id().to_string(),
-            summary: dep_ticket.summary(),
-            children: deps_recursively(dep_ticket, lookup, visited, selection),
+            id: child.id().to_string(),
+            summary: child.summary(),
+            children: children_recursively(child, source, visited, selection),
         });
     }
 
@@ -186,29 +267,47 @@ mod tests {
             .unwrap_or_else(|| panic!("expected a root {id}"))
     }
 
-    // Decision A -- a ticket becomes a top-level root iff:
-    //   root(t) = matches_selection(t, selection) && !dependency_ids.contains(t.id())
-    // (the two `.filter` calls form a short-circuit AND).
+    // Decision A -- a ticket becomes a top-level root iff (the two `.filter`
+    // calls form a short-circuit AND):
+    //   root(t) = matches_selection(t, selection) && is_root(t, orientation, ..)
     //   c1 = matches_selection(t, selection)
-    //   c2 = !dependency_ids.contains(t.id())   [t is depended-upon by no one]
-    // Independence pairs (outcome = is-a-root):
+    //   c2 = is_root(t, orientation, ..)         [orientation-dispatched, below]
+    // `is_root` switches on `orientation`: the Normal arm is
+    // `!dependency_ids.contains(t.id())` (t is depended-upon by no one); the
+    // Inverted arm is its own decision, enumerated as Decision D.
+    // Independence pairs (outcome = is-a-root), taken in the Normal arm:
     //   c1: (T,T)=root vs (F,T)=not-root
     //       -> selection_open_excludes_closed_at_top_level ("o" root vs "c" filtered, neither is a dep)
     //   c2: (T,T)=root vs (T,F)=not-root
     //       -> dependency_is_never_a_root ("a" root vs "b" which matches selection but is a dep)
     //
-    // Decision B -- a dependency is added as a child iff (short-circuit `continue`s):
-    //   child(dep) = visited.insert(dep) && lookup.get(dep).is_some() && matches_selection(dep, selection)
-    //   c1 = visited.insert(dep)                 [dep not yet seen in this root's walk]
-    //   c2 = lookup.get(dep).is_some()           [dep exists in the slice]
-    //   c3 = matches_selection(dep, selection)
-    // Independence pairs (outcome = dep-is-a-child):
-    //   c1: (T,T,T)=child vs (F,-,-)=skipped
+    // Decision B -- inside `children_recursively`, a candidate (already resolved
+    // to a `&Ticket` by `ChildSource::children_of`) is added as a child iff
+    // (short-circuit `continue`s):
+    //   child(c) = visited.insert(c) && matches_selection(c, selection)
+    //   c1 = visited.insert(c)                   [c not yet seen in this root's walk]
+    //   c2 = matches_selection(c, selection)
+    // Independence pairs (outcome = candidate-is-a-child):
+    //   c1: (T,T)=child vs (F,-)=skipped
     //       -> repeated_dependency_within_a_root_is_collapsed_once ("d" kept under "b", pruned under "c")
-    //   c2: (T,T,T)=child vs (T,F,-)=skipped
-    //       -> dependency_missing_from_lookup_is_skipped ("ghost" absent from the slice)
-    //   c3: (T,T,T)=child vs (T,T,F)=skipped
+    //          (inverted analogue: inverted_shared_dependant_collapses_within_a_root)
+    //   c2: (T,T)=child vs (T,F)=skipped
     //       -> selection_filters_nested_dependencies ("o"/"p" kept, closed "c" pruned)
+    //          (inverted analogue: inverted_open_selection_prunes_closed_dependant)
+    // The separate single-condition decision in `ChildSource::children_of`'s
+    // `Deps` arm (a dep id resolves via `lookup`) drops unknown dep ids before
+    // the walk; branch coverage: dependency_missing_from_lookup_is_skipped.
+    //
+    // Decision D -- inverted-orientation root eligibility (`is_root`'s Inverted arm):
+    //   root_inv(t) = !t.deps().iter().any(|d| lookup.contains_key(d))
+    // The `.any` is an OR-fold over each dep's `lookup.contains_key(d)`; a root is
+    // a ticket every one of whose deps is unresolvable (or which has no deps).
+    //   c = lookup.contains_key(d)               [some dep d of t resolves in the slice]
+    // Independence pair (outcome = is-a-root):
+    //   c: all deps unresolvable (any=F) => root  vs  a resolvable dep present (any=T) => not-root
+    //      -> inverted_all_ghost_deps_is_a_root vs inverted_resolvable_dep_is_not_a_root
+    // The vacuous empty-deps case (any over [] = F => root) is covered by
+    // inverted_leaf_with_no_deps_is_a_root.
     //
     // Decision C -- matches_selection is a multi-outcome match on `selection`,
     // with the Open arm being `status != Closed`. Discrete-outcome coverage per
@@ -225,7 +324,7 @@ mod tests {
             ticket("a", StatusValue::Open, 2, &["b"]),
             ticket("b", StatusValue::Open, 2, &[]),
         ];
-        let forest = assemble_ticket_forest(&tickets, TicketSelection::All);
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Normal);
         assert_eq!(root_ids(&forest), vec!["a"]);
         assert_eq!(child_ids(&forest[0]), vec!["b"]);
     }
@@ -238,7 +337,7 @@ mod tests {
             ticket("b", StatusValue::Open, 2, &["c"]),
             ticket("c", StatusValue::Open, 2, &[]),
         ];
-        let forest = assemble_ticket_forest(&tickets, TicketSelection::All);
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Normal);
         assert_eq!(root_ids(&forest), vec!["a", "b"]);
         assert_eq!(child_ids(find(&forest, "a")), vec!["c"]);
         assert_eq!(child_ids(find(&forest, "b")), vec!["c"]);
@@ -254,7 +353,7 @@ mod tests {
             ticket("c", StatusValue::Open, 2, &["d"]),
             ticket("d", StatusValue::Open, 2, &[]),
         ];
-        let forest = assemble_ticket_forest(&tickets, TicketSelection::All);
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Normal);
         let a = find(&forest, "a");
         assert_eq!(child_ids(a), vec!["b", "c"]);
         assert_eq!(child_ids(&a.children[0]), vec!["d"]);
@@ -273,7 +372,7 @@ mod tests {
             ticket("a", StatusValue::Open, 2, &["b"]),
             ticket("b", StatusValue::Open, 2, &["a"]),
         ];
-        let forest = assemble_ticket_forest(&tickets, TicketSelection::All);
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Normal);
         assert_eq!(root_ids(&forest), vec!["r"]);
         let a = &find(&forest, "r").children[0];
         assert_eq!(a.id, "a");
@@ -288,7 +387,7 @@ mod tests {
     fn dependency_missing_from_lookup_is_skipped() {
         // A references a dep id absent from the slice; it is silently dropped.
         let tickets = vec![ticket("a", StatusValue::Open, 2, &["ghost"])];
-        let forest = assemble_ticket_forest(&tickets, TicketSelection::All);
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Normal);
         assert_eq!(root_ids(&forest), vec!["a"]);
         assert!(forest[0].children.is_empty());
     }
@@ -302,7 +401,7 @@ mod tests {
             ticket("p", StatusValue::InProgress, 2, &[]),
             ticket("c", StatusValue::Closed, 2, &[]),
         ];
-        let forest = assemble_ticket_forest(&tickets, TicketSelection::All);
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Normal);
         assert_eq!(root_ids(&forest), vec!["o", "p", "c"]);
     }
 
@@ -314,7 +413,7 @@ mod tests {
             ticket("p", StatusValue::InProgress, 2, &[]),
             ticket("c", StatusValue::Closed, 2, &[]),
         ];
-        let forest = assemble_ticket_forest(&tickets, TicketSelection::Open);
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::Open, Orientation::Normal);
         assert_eq!(root_ids(&forest), vec!["o", "p"]);
     }
 
@@ -325,7 +424,8 @@ mod tests {
             ticket("p", StatusValue::InProgress, 2, &[]),
             ticket("c", StatusValue::Closed, 2, &[]),
         ];
-        let forest = assemble_ticket_forest(&tickets, TicketSelection::InProgress);
+        let forest =
+            assemble_ticket_forest(&tickets, TicketSelection::InProgress, Orientation::Normal);
         assert_eq!(root_ids(&forest), vec!["p"]);
     }
 
@@ -336,7 +436,7 @@ mod tests {
             ticket("p", StatusValue::InProgress, 2, &[]),
             ticket("c", StatusValue::Closed, 2, &[]),
         ];
-        let forest = assemble_ticket_forest(&tickets, TicketSelection::Closed);
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::Closed, Orientation::Normal);
         assert_eq!(root_ids(&forest), vec!["c"]);
     }
 
@@ -350,7 +450,7 @@ mod tests {
             ticket("p", StatusValue::InProgress, 2, &[]),
             ticket("c", StatusValue::Closed, 2, &[]),
         ];
-        let forest = assemble_ticket_forest(&tickets, TicketSelection::Open);
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::Open, Orientation::Normal);
         assert_eq!(root_ids(&forest), vec!["a"]);
         assert_eq!(child_ids(&forest[0]), vec!["o", "p"]);
     }
@@ -363,7 +463,7 @@ mod tests {
             ticket("a", StatusValue::Open, 2, &["b"]),
             ticket("b", StatusValue::Closed, 2, &[]),
         ];
-        let forest = assemble_ticket_forest(&tickets, TicketSelection::Open);
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::Open, Orientation::Normal);
         assert_eq!(root_ids(&forest), vec!["a"]);
         assert!(forest[0].children.is_empty());
     }
@@ -375,7 +475,7 @@ mod tests {
             ticket("a", StatusValue::Open, 2, &[]),
             ticket("m", StatusValue::Open, 2, &[]),
         ];
-        let forest = assemble_ticket_forest(&tickets, TicketSelection::All);
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Normal);
         assert_eq!(root_ids(&forest), vec!["z", "a", "m"]);
     }
 
@@ -387,21 +487,37 @@ mod tests {
             ticket("b", StatusValue::Open, 2, &[]),
             ticket("c", StatusValue::Open, 2, &[]),
         ];
-        let forest = assemble_ticket_forest(&tickets, TicketSelection::All);
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Normal);
         assert_eq!(child_ids(&forest[0]), vec!["c", "b"]);
     }
 
     #[test]
     fn node_summary_uses_priority_id_title_format() {
         let tickets = vec![ticket("abc", StatusValue::Open, 3, &[])];
-        let forest = assemble_ticket_forest(&tickets, TicketSelection::All);
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Normal);
         assert_eq!(forest[0].summary, "[P3] abc: Title abc");
     }
 
     #[test]
     fn empty_slice_yields_empty_forest() {
-        let forest = assemble_ticket_forest(&[], TicketSelection::All);
+        let forest = assemble_ticket_forest(&[], TicketSelection::All, Orientation::Normal);
         assert!(forest.is_empty());
+    }
+
+    #[test]
+    fn duplicate_ids_keep_their_own_dependencies() {
+        // Two tickets sharing an id (possible in a hand-edited store) must each
+        // walk their own deps() rather than aliasing through an id-keyed map.
+        let tickets = vec![
+            ticket("a", StatusValue::Open, 2, &["x"]),
+            ticket("a", StatusValue::Open, 2, &["y"]),
+            ticket("x", StatusValue::Open, 2, &[]),
+            ticket("y", StatusValue::Open, 2, &[]),
+        ];
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Normal);
+        assert_eq!(root_ids(&forest), vec!["a", "a"]);
+        assert_eq!(child_ids(&forest[0]), vec!["x"]);
+        assert_eq!(child_ids(&forest[1]), vec!["y"]);
     }
 
     #[test]
@@ -418,7 +534,7 @@ mod tests {
             ticket("b1", StatusValue::Open, 2, &[]),
             ticket("b2", StatusValue::Open, 2, &[]),
         ];
-        let forest = assemble_ticket_forest(&tickets, TicketSelection::All);
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Normal);
         assert_eq!(
             render_forest(&forest),
             "[P2] r: Title r\n\
@@ -429,5 +545,175 @@ mod tests {
              \x20   ├── [P2] b1: Title b1\n\
              \x20   └── [P2] b2: Title b2\n"
         );
+    }
+
+    // --- Inverted orientation ---------------------------------------------
+
+    #[test]
+    fn inverted_leaf_with_no_deps_is_a_root() {
+        // Decision D, vacuous arm: `.any` over an empty deps list is false, so a
+        // ticket with no dependency of its own is a root.
+        let tickets = vec![ticket("l", StatusValue::Open, 2, &[])];
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Inverted);
+        assert_eq!(root_ids(&forest), vec!["l"]);
+        assert!(forest[0].children.is_empty());
+    }
+
+    #[test]
+    fn inverted_all_ghost_deps_is_a_root() {
+        // Decision D, c=F: no dep resolves in the slice, so `.any` is false and
+        // the ticket is still a root. Independence pair with
+        // inverted_resolvable_dep_is_not_a_root.
+        let tickets = vec![ticket("a", StatusValue::Open, 2, &["ghost1", "ghost2"])];
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Inverted);
+        assert_eq!(root_ids(&forest), vec!["a"]);
+        assert!(forest[0].children.is_empty());
+    }
+
+    #[test]
+    fn inverted_resolvable_dep_is_not_a_root() {
+        // Decision D, c=T: one dep resolves (`b`), so `.any` is true and `a` is
+        // not a root -- it nests under `b` as a dependant instead.
+        let tickets = vec![
+            ticket("a", StatusValue::Open, 2, &["ghost", "b"]),
+            ticket("b", StatusValue::Open, 2, &[]),
+        ];
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Inverted);
+        assert_eq!(root_ids(&forest), vec!["b"]);
+        assert_eq!(child_ids(&forest[0]), vec!["a"]);
+    }
+
+    #[test]
+    fn inverted_children_are_dependants_in_input_slice_order() {
+        // `a` is depended on by `c` then `b` (slice order c, b); its dependant
+        // children preserve that input-slice order rather than id order.
+        let tickets = vec![
+            ticket("a", StatusValue::Open, 2, &[]),
+            ticket("c", StatusValue::Open, 2, &["a"]),
+            ticket("b", StatusValue::Open, 2, &["a"]),
+        ];
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Inverted);
+        assert_eq!(root_ids(&forest), vec!["a"]);
+        assert_eq!(child_ids(&forest[0]), vec!["c", "b"]);
+    }
+
+    #[test]
+    fn inverted_single_leaf_nests_all_dependants() {
+        // Leaf `l` is depended on by both `x` and `y`; inverted, it is the sole
+        // root and both dependants appear as its children.
+        let tickets = vec![
+            ticket("l", StatusValue::Open, 2, &[]),
+            ticket("x", StatusValue::Open, 2, &["l"]),
+            ticket("y", StatusValue::Open, 2, &["l"]),
+        ];
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Inverted);
+        assert_eq!(root_ids(&forest), vec!["l"]);
+        assert_eq!(child_ids(find(&forest, "l")), vec!["x", "y"]);
+    }
+
+    #[test]
+    fn inverted_shared_leaf_nests_epic_under_each_root() {
+        // Epic `e` depends on leaves `l1` and `l2`; inverted, each leaf is its
+        // own root and `e` nests once under each (mirror of
+        // shared_dependency_nests_under_each_root).
+        let tickets = vec![
+            ticket("l1", StatusValue::Open, 2, &[]),
+            ticket("l2", StatusValue::Open, 2, &[]),
+            ticket("e", StatusValue::Open, 2, &["l1", "l2"]),
+        ];
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Inverted);
+        assert_eq!(root_ids(&forest), vec!["l1", "l2"]);
+        assert_eq!(child_ids(find(&forest, "l1")), vec!["e"]);
+        assert_eq!(child_ids(find(&forest, "l2")), vec!["e"]);
+    }
+
+    #[test]
+    fn inverted_shared_dependant_collapses_within_a_root() {
+        // Decision B, c1 (inverted): `e` depends on both `m1` and `m2`, which
+        // both depend on `l`. Within root `l` the per-root visited set is
+        // consumed by m1's branch, so `e` does not reappear under m2.
+        let tickets = vec![
+            ticket("l", StatusValue::Open, 2, &[]),
+            ticket("m1", StatusValue::Open, 2, &["l"]),
+            ticket("m2", StatusValue::Open, 2, &["l"]),
+            ticket("e", StatusValue::Open, 2, &["m1", "m2"]),
+        ];
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Inverted);
+        let l = find(&forest, "l");
+        assert_eq!(child_ids(l), vec!["m1", "m2"]);
+        assert_eq!(child_ids(&l.children[0]), vec!["e"]);
+        assert!(
+            l.children[1].children.is_empty(),
+            "e must not reappear under m2 within root l"
+        );
+    }
+
+    #[test]
+    fn inverted_dependency_cycle_terminates_without_repeating() {
+        // Leaf `l`; `a` depends on [l, b]; `b` depends on `a`. Inverted the walk
+        // is l -> a (dependant) -> b (dependant) -> a, and the back-edge to `a`
+        // is pruned by the visited guard.
+        let tickets = vec![
+            ticket("l", StatusValue::Open, 2, &[]),
+            ticket("a", StatusValue::Open, 2, &["l", "b"]),
+            ticket("b", StatusValue::Open, 2, &["a"]),
+        ];
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Inverted);
+        assert_eq!(root_ids(&forest), vec!["l"]);
+        let a = &find(&forest, "l").children[0];
+        assert_eq!(a.id, "a");
+        assert_eq!(child_ids(a), vec!["b"]);
+        assert!(
+            a.children[0].children.is_empty(),
+            "cycle back to a must be pruned"
+        );
+    }
+
+    #[test]
+    fn inverted_open_selection_prunes_closed_dependant() {
+        // Decision B, c2 (inverted): under Open selection a closed dependant is
+        // pruned from its leaf's children.
+        let tickets = vec![
+            ticket("l", StatusValue::Open, 2, &[]),
+            ticket("d", StatusValue::Closed, 2, &["l"]),
+        ];
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::Open, Orientation::Inverted);
+        assert_eq!(root_ids(&forest), vec!["l"]);
+        assert!(forest[0].children.is_empty());
+    }
+
+    #[test]
+    fn inverted_open_selection_excludes_closed_leaf_root() {
+        // A closed leaf is a root by Decision D but filtered by selection at the
+        // top level; the open leaf remains.
+        let tickets = vec![
+            ticket("c", StatusValue::Closed, 2, &[]),
+            ticket("o", StatusValue::Open, 2, &[]),
+        ];
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::Open, Orientation::Inverted);
+        assert_eq!(root_ids(&forest), vec!["o"]);
+    }
+
+    #[test]
+    fn inverted_multi_level_chain_reverses_normal() {
+        // Regression guard: the same leaf->mid->epic chain nests the opposite way
+        // under each orientation, over identical fixtures.
+        let tickets = vec![
+            ticket("l", StatusValue::Open, 2, &[]),
+            ticket("m", StatusValue::Open, 2, &["l"]),
+            ticket("e", StatusValue::Open, 2, &["m"]),
+        ];
+        let normal = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Normal);
+        assert_eq!(root_ids(&normal), vec!["e"]);
+        let nm = &find(&normal, "e").children[0];
+        assert_eq!(nm.id, "m");
+        assert_eq!(child_ids(nm), vec!["l"]);
+
+        let inverted =
+            assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Inverted);
+        assert_eq!(root_ids(&inverted), vec!["l"]);
+        let im = &find(&inverted, "l").children[0];
+        assert_eq!(im.id, "m");
+        assert_eq!(child_ids(im), vec!["e"]);
     }
 }
