@@ -12,6 +12,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::fs::write_ticket;
+use crate::publish::{self, GithubPublishArgs};
 use crate::{
     LinkOp, RemovalOutcome, Ticket, TicketBody, apply_query_filter, build_link_plan, dep_add,
     find_ticket, git_user_name,
@@ -75,6 +76,8 @@ pub enum Command {
     AddNote(AddNoteArgs),
     #[command(about = "Output tickets as JSON, optionally filtered")]
     Query(QueryArgs),
+    #[command(about = "Publish a ticket to an external tracker")]
+    Publish(PublishArgs),
     #[command(about = "Update tk to the latest release from GitHub")]
     Update(UpdateArgs),
 }
@@ -493,6 +496,26 @@ pub struct QueryArgs {
         help = "Output format: ndjson (default) or pretty JSON array"
     )]
     format: QueryFormat,
+}
+
+/// `tk publish <target>`: nested like `dep`, so further publish targets can
+/// be added without reshaping this command.
+#[derive(Args, Debug)]
+pub struct PublishArgs {
+    #[command(subcommand)]
+    action: PublishAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PublishAction {
+    #[command(about = "Publish a ticket as a GitHub issue")]
+    Github(GithubPublishArgs),
+}
+
+pub fn cmd_publish(args: PublishArgs) -> color_eyre::Result<()> {
+    match args.action {
+        PublishAction::Github(gh_args) => publish::cmd_publish_github(gh_args),
+    }
 }
 
 #[derive(Args, Debug)]

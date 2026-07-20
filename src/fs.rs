@@ -150,7 +150,43 @@ pub fn write_ticket(ticket: &Ticket) -> color_eyre::Result<()> {
     content.push_str(&format!("# {}\n\n", ticket.title));
     content.push_str(&ticket.body().to_string());
 
-    std::fs::write(&ticket.path, content)?;
+    // Write-then-rename so a failed or interrupted write can never truncate
+    // the existing ticket; the rename is atomic within the tickets dir.
+    let file_name = ticket
+        .path
+        .file_name()
+        .ok_or_else(|| eyre!("ticket path has no file name: {}", ticket.path.display()))?
+        .to_string_lossy();
+    let tmp_path = ticket
+        .path
+        .with_file_name(format!(".{file_name}.tmp-{}", std::process::id()));
+    // Preserve the destination's permission semantics across the rename:
+    // refuse read-only tickets (as an in-place write would), and carry the
+    // original mode onto the replacement inode.
+    let existing_perms = match std::fs::metadata(&ticket.path) {
+        Ok(meta) => {
+            let perms = meta.permissions();
+            if perms.readonly() {
+                return Err(eyre!("ticket file is read-only: {}", ticket.path.display()));
+            }
+            Some(perms)
+        }
+        Err(_) => None,
+    };
+    let write_and_rename = (|| -> std::io::Result<()> {
+        use std::io::Write as _;
+        let mut file = std::fs::File::create(&tmp_path)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        if let Some(perms) = existing_perms {
+            std::fs::set_permissions(&tmp_path, perms)?;
+        }
+        std::fs::rename(&tmp_path, &ticket.path)
+    })();
+    if write_and_rename.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    write_and_rename?;
 
     Ok(())
 }

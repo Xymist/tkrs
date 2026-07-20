@@ -20,6 +20,7 @@ use crate::fs::{lock_tickets, read_ticket, tickets_dir, write_ticket};
 pub mod cli;
 pub mod fs;
 pub mod ids;
+pub mod publish;
 pub mod tui;
 
 pub fn dep_add(
@@ -920,6 +921,10 @@ pub enum TicketSection {
 impl Ticket {
     pub fn id(&self) -> &str {
         &self.frontmatter.id
+    }
+
+    pub fn title(&self) -> &str {
+        &self.title
     }
 
     pub fn status(&self) -> &StatusValue {

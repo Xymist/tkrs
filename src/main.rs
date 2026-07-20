@@ -2,8 +2,8 @@ use clap::Parser;
 use ticket::{
     cli::{
         Command, TicketCli, cmd_add_note, cmd_blocked, cmd_close, cmd_closed, cmd_create, cmd_dep,
-        cmd_edit, cmd_link, cmd_ls, cmd_query, cmd_ready, cmd_reopen, cmd_show, cmd_start,
-        cmd_status, cmd_undep, cmd_unlink, cmd_update,
+        cmd_edit, cmd_link, cmd_ls, cmd_publish, cmd_query, cmd_ready, cmd_reopen, cmd_show,
+        cmd_start, cmd_status, cmd_undep, cmd_unlink, cmd_update,
     },
     fs::{lock_tickets, refresh_ticket_cache},
     tui::TuiApp,
@@ -58,6 +58,7 @@ fn main() -> color_eyre::Result<()> {
         Command::Edit(args) => cmd_edit(args)?,
         Command::AddNote(args) => cmd_add_note(args)?,
         Command::Query(args) => cmd_query(args)?,
+        Command::Publish(args) => cmd_publish(args)?,
         Command::Update(_) => unreachable!("handled before refresh_ticket_cache"),
     };
 

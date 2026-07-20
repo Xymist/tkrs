@@ -38,6 +38,9 @@ ID matching works for `show`, `start`, `close`, `edit`, etc.
 - `blocked` -- open/in-progress with unresolved deps
 - `closed` -- recently closed
 - `query [FILTER]` -- tickets as NDJSON or pretty JSON
+- `publish github <id> <owner/repo>` -- file the ticket as a GitHub
+  issue via `gh` (see the `tk-to-github-issue` skill for the full
+  workflow, including the required readability pass)
 - `update` -- self-update `tk` to the latest GitHub release
 - `tui` -- experimental interactive browser (keyboard + mouse)
 
@@ -169,6 +172,18 @@ tk ready                # nothing blocking; pick from here
 tk blocked              # waiting on deps
 ```
 
+### Publish a ticket to GitHub
+
+```sh
+tk publish github auc-1f89 owner/repo --dry-run   # render, create nothing
+tk publish github auc-1f89 owner/repo \
+  --body-file polished.md --assignee @me          # create + pin external_ref
+```
+
+Load the `tk-to-github-issue` skill before publishing — it documents
+the required readability pass, `--fields-json` for repos with their
+own issue forms, and the pinning/re-file semantics.
+
 ## Gotchas
 
 - **Verb names**: `create` / `close` / `add-note`. Not `add`, `done`,
@@ -201,6 +216,11 @@ tk blocked              # waiting on deps
   use `--external-ref gh-NNNNN` to pin a ticket to a public issue.
   (The `tk` repo itself commits its tickets and uses IDs in commit
   messages; follow the convention of the repo you are in.)
+- **`tk publish` enforces the id-leak rule and idempotency.** It
+  hard-fails if the outbound issue would contain the source ticket's
+  id or any id from the local store, and refuses to publish an
+  already-pinned ticket without `--re-file`. Publishes are serialized
+  per store via `.tickets/.publish.lock`.
 - **No bulk delete**. To abandon a ticket, `tk close` it with a note
   explaining why; don't try to remove the file by hand.
 

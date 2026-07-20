@@ -61,16 +61,34 @@ Claude Opus picks it up naturally from there. Other models may need additional g
   `--print` prints the ticket path; `add-note` is idempotent on headers
   and supports `--tag <label>`)
 - `tk query [FILTER]` — output tickets as JSON; supports `--format ndjson|pretty` and built-in filters (`field==value` exact match, `field~substr` contains)
+- `tk publish github <id> <owner/repo>` — render a ticket as a GitHub
+  issue-form submission and file it with `gh issue create` (nested like
+  `dep`, so other publish targets can be added later); supports
+  `--assignee`, `--title-prefix` (default `"[Maintenance]: "`),
+  `--fields-json` to replace the default field set, `--dry-run` to print
+  the title/body/gh command without creating anything, `--body-file` to
+  supply a pre-written body (title, pinning and priority still come from
+  the ticket), `--no-pin`, `--re-file` to re-file an already-pinned
+  ticket, `--no-priority`, `--priority-field` (default `Priority`), and
+  repeatable `--label`. Best-effort sets the repo's single-select
+  Priority issue field from the ticket's priority after creation. tk ids
+  are never written to GitHub: the outbound title/body is checked against
+  the ticket's own id and every id in the local store before anything is
+  created, and an OS-level advisory file lock
+  (`.tickets/.publish.lock`) is held across the whole check-create-pin
+  sequence, so a second `tk publish` — even from a separate process —
+  fails closed immediately instead of racing the first into
+  double-creating an issue.
 - `tk update` — self-update `tk` to the latest release published on GitHub, installing it over the running binary; prints `No new version available` when already current
 - `tk tui` — EXPERIMENTAL - Start a TUI for browsing tickets with a little more context than just a bucket of IDs. Navigate with the keyboard (↑/↓ to move, →/← to expand/collapse, `Tab` to switch panes, `S` to cycle the status filter, `j`/`k`/PageUp/PageDown to scroll the content) or with the mouse (click a ticket to select it, click a pane to focus it, scroll wheel to scroll whichever pane the cursor is over).
 
 ## Agent skills
 
 The repo ships Claude Code skills for agents under `skills/`:
-`tk-cli` (CLI reference) and `tk-to-github-issue` (convert a ticket
-into a GitHub maintenance issue). To install one, symlink it into
-your personal skills directory so it stays in lockstep with the
-checkout:
+`tk-cli` (CLI reference) and `tk-to-github-issue` (the workflow guide
+for `tk publish github` — readability pass, field specs, leak rules).
+To install one, symlink it into your personal skills directory so it
+stays in lockstep with the checkout:
 
 ```sh
 ln -s "$(pwd)/skills/tk-cli" ~/.claude/skills/tk-cli

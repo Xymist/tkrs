@@ -2,6 +2,38 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-20
+
+### Added
+
+- `tk publish github <id> <owner/repo>` renders a tk ticket as a GitHub
+  issue-form submission and files it with `gh issue create`, natively
+  replacing the `tk-to-github-issue` Python skill script for this repo's
+  own use: `--assignee`, `--title-prefix`, `--fields-json`, `--dry-run`,
+  `--body-file`, `--no-pin`, `--re-file`, `--no-priority`,
+  `--priority-field`, and repeatable `--label` mirror the script's flags,
+  and the default body byte-matches its output. Uses tk's own parsed
+  ticket model instead of reparsing the file, and holds an OS-level
+  advisory file lock (`.tickets/.publish.lock`) across the
+  check-create-pin sequence, so a second `tk publish` invocation — even
+  from a separate process — fails closed immediately instead of racing
+  the first into double-creating an issue for the same ticket.
+
+### Fixed
+
+- Ticket writes are now atomic (write to a temp file, fsync, rename):
+  a failed or interrupted write — out of disk space, I/O error, kill —
+  can no longer truncate or corrupt the existing ticket file. This
+  applies to every mutating command (`edit`, `close`, `add-note`,
+  `dep`, `publish` pinning, ...).
+
+### Removed
+
+- The `tk_to_gh_issue.py` script inside the `tk-to-github-issue` skill:
+  `tk publish github` replaces it natively. The skill remains as the
+  workflow guide (readability pass, field specs, leak rules) for the
+  subcommand, and the `tk-cli` skill documents the new command.
+
 ## [0.7.2] - 2026-07-20
 
 ### Added

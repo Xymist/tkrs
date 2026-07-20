@@ -2934,3 +2934,87 @@ fn update_help_describes_github_self_update() {
             "Update tk to the latest release from GitHub",
         ));
 }
+
+#[test]
+fn failed_write_preserves_original_ticket_contents() {
+    let temp = TempDir::new().unwrap();
+    let id = create_ticket(&temp, "Integrity Guard");
+    let before = ticket_contents(&temp, &id);
+
+    let tickets_dir = temp.path().join(".tickets");
+    let mut perms = fs::metadata(&tickets_dir).unwrap().permissions();
+    let original_perms = perms.clone();
+    perms.set_readonly(true);
+    fs::set_permissions(&tickets_dir, perms).unwrap();
+
+    // Root (some CI environments) ignores directory write bits; skip there.
+    let probe = tickets_dir.join(".write-probe");
+    if fs::File::create(&probe).is_ok() {
+        let _ = fs::remove_file(&probe);
+        fs::set_permissions(&tickets_dir, original_perms).unwrap();
+        return;
+    }
+
+    tk_cmd(&temp)
+        .arg("edit")
+        .arg(&id)
+        .arg("-d")
+        .arg("replacement text")
+        .assert()
+        .failure();
+
+    fs::set_permissions(&tickets_dir, original_perms).unwrap();
+    assert_eq!(
+        ticket_contents(&temp, &id),
+        before,
+        "failed write leaves the ticket byte-for-byte intact"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn edit_preserves_restrictive_file_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().unwrap();
+    let id = create_ticket(&temp, "Perms Guard");
+    let path = temp.path().join(".tickets").join(format!("{id}.md"));
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    tk_cmd(&temp)
+        .arg("edit")
+        .arg(&id)
+        .arg("-d")
+        .arg("updated")
+        .assert()
+        .success();
+
+    let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "0600 survives an edit");
+}
+
+#[cfg(unix)]
+#[test]
+fn edit_refuses_read_only_ticket_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().unwrap();
+    let id = create_ticket(&temp, "ReadOnly Guard");
+    let path = temp.path().join(".tickets").join(format!("{id}.md"));
+    let before = ticket_contents(&temp, &id);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+
+    tk_cmd(&temp)
+        .arg("edit")
+        .arg(&id)
+        .arg("-d")
+        .arg("updated")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("read-only"));
+
+    let meta = fs::metadata(&path).unwrap();
+    assert_eq!(meta.permissions().mode() & 0o777, 0o444, "mode unchanged");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(ticket_contents(&temp, &id), before, "bytes unchanged");
+}
