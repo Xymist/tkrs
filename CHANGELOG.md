@@ -17,6 +17,16 @@
   identifier (now unreachable from disk data) renders as a visible
   error message in the pane instead of panicking or leaving it blank.
 
+### Changed
+
+- `tk tree`/`tk graph`'s fallback-root eligibility (the sink/source
+  strongly-connected-component check for a ticket left unrepresented
+  by the regular root walk) is now computed once per assembly via an
+  iterative Kosaraju pass over the whole graph, instead of a separate
+  reachability search per unrepresented candidate. Output is
+  unchanged; a store with a long dependency chain feeding into a
+  cycle assembles in linear time instead of cubic.
+
 ## [0.11.0] - 2026-07-21
 
 ### Fixed
