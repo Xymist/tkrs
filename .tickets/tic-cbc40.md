@@ -1,13 +1,14 @@
 ---
 id: tic-cbc40
 type: feature
-status: open
+status: closed
 deps: []
 links: []
 priority: 2
 assignee: Xymist
 tags: []
 created: 2026-07-21T18:30:04.677623704Z
+closed_at: 2026-07-21T19:01:30.390773601Z
 ---
 # tk tree --root: restrict output to one ticket subtree
 
@@ -23,4 +24,4 @@ tk tree --root <id> prints only that subtree; works with --inverted and --status
 
 ## Notes
 
--
+- [status_change: open -> closed] Shipped in v0.10.0: -r/--root on tk tree, partial-ID resolvable, composes with --status (applies to the root too) and --inverted. @ 2026-07-21 19:01:30 UTC
