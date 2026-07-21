@@ -1,13 +1,14 @@
 ---
 id: tic-eda19
 type: chore
-status: open
+status: closed
 deps: []
 links: []
 priority: 3
 assignee: Xymist
 tags: []
 created: 2026-07-21T21:18:28.540013826Z
+closed_at: 2026-07-21T22:42:30.445828485Z
 ---
 # Bounded expansion policy for path-local tree repeats on dense DAGs
 
@@ -23,4 +24,4 @@ Dense layered-diamond stress fixture renders within the bound with a visible tru
 
 ## Notes
 
--
+- [status_change: open -> closed] Shipped: 10k default node budget with marker, --unbounded flag, linear closure DFS, empty-id load rejection. Committed as tic-eda19. @ 2026-07-21 22:42:30 UTC
