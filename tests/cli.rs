@@ -3037,6 +3037,304 @@ fn tree_create_priority(dir: &TempDir, title: &str, priority: &str) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+/// Shortest hash-tail substring of `id` that no other id in `others` contains,
+/// so `resolve_partial_id` resolves it uniquely back to `id`.
+fn unique_partial(id: &str, others: &[&str]) -> String {
+    let hash = id.rsplit('-').next().unwrap_or(id);
+    for len in 1..=hash.len() {
+        let sub = &hash[..len];
+        if !others.iter().any(|o| o.contains(sub)) {
+            return sub.to_string();
+        }
+    }
+    id.to_string()
+}
+
+/// The common leading substring of two ids (always their shared `prefix-`),
+/// which `resolve_partial_id` treats as ambiguous because both ids contain it.
+fn shared_prefix(a: &str, b: &str) -> String {
+    let mut common = String::new();
+    for (x, y) in a.chars().zip(b.chars()) {
+        if x == y {
+            common.push(x);
+        } else {
+            break;
+        }
+    }
+    if common.is_empty() {
+        common.push_str(&a[..1.min(a.len())]);
+    }
+    common
+}
+
+/// Sanitized Mermaid node id, mirroring `sanitize_mermaid_id` in
+/// `src/tree.rs` -- keep the two in sync: every character outside
+/// `[A-Za-z0-9_]` (the id's `-`, and the leading `.` of a temp-dir prefix)
+/// becomes `_`, and the result is prefixed with `t_` (guards against a
+/// Mermaid keyword collision, a leading digit, or an empty id).
+fn mermaid_id(id: &str) -> String {
+    let mut sanitized = String::from("t_");
+    sanitized.extend(id.chars().map(|c| {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            c
+        } else {
+            '_'
+        }
+    }));
+    sanitized
+}
+
+const MERMAID_HEADER: &str = "%%{init: {\"flowchart\": {\"curve\": \"linear\"}}}%%\nflowchart TD\n";
+
+#[test]
+fn tree_root_restricts_to_subtree_full_and_partial_id() {
+    let temp = TempDir::new().unwrap();
+    let a = tree_create(&temp, "Epic A");
+    let b = tree_create(&temp, "Mid B");
+    let c = tree_create(&temp, "Leaf C");
+    let d = tree_create(&temp, "Unrelated D");
+    // Chain A -> B -> C; D stands alone.
+    tk_cmd(&temp).arg("dep").arg(&a).arg(&b).assert().success();
+    tk_cmd(&temp).arg("dep").arg(&b).arg(&c).assert().success();
+
+    // Full id: rooting at B shows only B and its dependency C.
+    tk_cmd(&temp)
+        .arg("tree")
+        .arg("--root")
+        .arg(&b)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&b))
+        .stdout(predicate::str::contains(&c))
+        .stdout(predicate::str::contains(&a).not())
+        .stdout(predicate::str::contains(&d).not());
+
+    // Partial id resolves the same subtree.
+    let partial = unique_partial(&b, &[&a, &c, &d]);
+    tk_cmd(&temp)
+        .arg("tree")
+        .arg("--root")
+        .arg(&partial)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&b))
+        .stdout(predicate::str::contains(&c))
+        .stdout(predicate::str::contains(&a).not())
+        .stdout(predicate::str::contains(&d).not());
+}
+
+#[test]
+fn tree_root_composes_with_inverted_and_status() {
+    let temp = TempDir::new().unwrap();
+    let l = tree_create(&temp, "Leaf");
+    let m = tree_create(&temp, "Mid");
+    let e = tree_create(&temp, "Epic");
+    // Chain epic -> mid -> leaf.
+    tk_cmd(&temp).arg("dep").arg(&m).arg(&l).assert().success();
+    tk_cmd(&temp).arg("dep").arg(&e).arg(&m).assert().success();
+
+    // Inverted subtree rooted at mid walks its dependants (epic), not its own
+    // dependency (leaf).
+    tk_cmd(&temp)
+        .arg("tree")
+        .arg("--root")
+        .arg(&m)
+        .arg("--inverted")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&m))
+        .stdout(predicate::str::contains(&e))
+        .stdout(predicate::str::contains(&l).not());
+
+    // Close the epic: default open selection prunes it from the subtree,
+    // `--status all` brings it back.
+    tk_cmd(&temp).arg("close").arg(&e).assert().success();
+    tk_cmd(&temp)
+        .arg("tree")
+        .arg("--root")
+        .arg(&m)
+        .arg("--inverted")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&m))
+        .stdout(predicate::str::contains(&e).not());
+    tk_cmd(&temp)
+        .arg("tree")
+        .arg("--root")
+        .arg(&m)
+        .arg("--inverted")
+        .arg("--status")
+        .arg("all")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&e));
+}
+
+#[test]
+fn tree_root_errors_on_unknown_and_ambiguous_id() {
+    let temp = TempDir::new().unwrap();
+    let alpha = tree_create(&temp, "Alpha");
+    let alps = tree_create(&temp, "Alps");
+
+    // Unknown id resolves to nothing, like every other resolve_partial_id path.
+    tk_cmd(&temp)
+        .arg("tree")
+        .arg("--root")
+        .arg("no-such-id")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not found"));
+
+    // The shared prefix matches both tickets.
+    let common = shared_prefix(&alpha, &alps);
+    tk_cmd(&temp)
+        .arg("tree")
+        .arg("--root")
+        .arg(&common)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("ambiguous ID"));
+}
+
+#[test]
+fn tree_root_on_closed_ticket_prints_nothing_by_default() {
+    let temp = TempDir::new().unwrap();
+    let t = tree_create(&temp, "Solo");
+    tk_cmd(&temp).arg("close").arg(&t).assert().success();
+
+    // Default open selection filters the closed root out: empty output, not a
+    // shallow tree.
+    tk_cmd(&temp)
+        .arg("tree")
+        .arg("--root")
+        .arg(&t)
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+}
+
+#[test]
+fn graph_emits_directive_header_node_and_edge_blocks() {
+    let temp = TempDir::new().unwrap();
+    let root = tree_create(&temp, "Root");
+    let child = tree_create(&temp, "Child");
+    tk_cmd(&temp)
+        .arg("dep")
+        .arg(&root)
+        .arg(&child)
+        .assert()
+        .success();
+
+    let out = tk_cmd(&temp).arg("graph").output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.starts_with(MERMAID_HEADER),
+        "graph must open with the init directive and flowchart header: {stdout}"
+    );
+    let root_s = mermaid_id(&root);
+    let child_s = mermaid_id(&child);
+    // Node block: `    <id>["<label>"]` per node.
+    assert!(stdout.contains(&format!("{root_s}[\"[P2] {root}: Root\"]")));
+    assert!(stdout.contains(&format!("{child_s}[\"[P2] {child}: Child\"]")));
+    // Edge block: dependant --> dependency under the default normal orientation.
+    assert!(stdout.contains(&format!("{root_s} --> {child_s}")));
+}
+
+#[test]
+fn graph_root_partial_restricts_and_inverted_flips_edges() {
+    let temp = TempDir::new().unwrap();
+    let l = tree_create(&temp, "Leaf");
+    let m = tree_create(&temp, "Mid");
+    let e = tree_create(&temp, "Epic");
+    let z = tree_create(&temp, "Zeta");
+    // Chain epic -> mid -> leaf; zeta unrelated.
+    tk_cmd(&temp).arg("dep").arg(&m).arg(&l).assert().success();
+    tk_cmd(&temp).arg("dep").arg(&e).arg(&m).assert().success();
+
+    let l_s = mermaid_id(&l);
+    let m_s = mermaid_id(&m);
+    let e_s = mermaid_id(&e);
+    let z_s = mermaid_id(&z);
+
+    // Normal orientation: dependant --> dependency.
+    let normal = tk_cmd(&temp).arg("graph").output().unwrap();
+    assert!(normal.status.success());
+    let normal_out = String::from_utf8_lossy(&normal.stdout);
+    assert!(normal_out.contains(&format!("{e_s} --> {m_s}")));
+    assert!(normal_out.contains(&format!("{m_s} --> {l_s}")));
+    assert!(!normal_out.contains(&format!("{m_s} --> {e_s}")));
+
+    // Inverted orientation flips every edge to dependency --> dependant.
+    let inverted = tk_cmd(&temp)
+        .arg("graph")
+        .arg("--inverted")
+        .output()
+        .unwrap();
+    assert!(inverted.status.success());
+    let inverted_out = String::from_utf8_lossy(&inverted.stdout);
+    assert!(inverted_out.contains(&format!("{l_s} --> {m_s}")));
+    assert!(inverted_out.contains(&format!("{m_s} --> {e_s}")));
+    assert!(!inverted_out.contains(&format!("{e_s} --> {m_s}")));
+
+    // Partial --root restricts to the mid subtree: only the mid -> leaf edge,
+    // with the epic and the unrelated zeta absent.
+    let partial = unique_partial(&m, &[&l, &e, &z]);
+    let restricted = tk_cmd(&temp)
+        .arg("graph")
+        .arg("--root")
+        .arg(&partial)
+        .output()
+        .unwrap();
+    assert!(restricted.status.success());
+    let restricted_out = String::from_utf8_lossy(&restricted.stdout);
+    assert!(restricted_out.contains(&format!("{m_s} --> {l_s}")));
+    assert!(!restricted_out.contains(&e_s));
+    assert!(!restricted_out.contains(&z_s));
+}
+
+#[test]
+fn graph_root_on_closed_ticket_prints_directive_and_header_only() {
+    let temp = TempDir::new().unwrap();
+    let t = tree_create(&temp, "Solo");
+    tk_cmd(&temp).arg("close").arg(&t).assert().success();
+
+    // Default open selection drops the only root, so no nodes and no edge block
+    // are rendered -- just the directive and header.
+    tk_cmd(&temp)
+        .arg("graph")
+        .arg("--root")
+        .arg(&t)
+        .assert()
+        .success()
+        .stdout(predicate::eq(MERMAID_HEADER));
+}
+
+#[test]
+fn graph_root_errors_on_unknown_and_ambiguous_id() {
+    let temp = TempDir::new().unwrap();
+    let alpha = tree_create(&temp, "Alpha");
+    let alps = tree_create(&temp, "Alps");
+
+    tk_cmd(&temp)
+        .arg("graph")
+        .arg("--root")
+        .arg("no-such-id")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not found"));
+
+    let common = shared_prefix(&alpha, &alps);
+    tk_cmd(&temp)
+        .arg("graph")
+        .arg("--root")
+        .arg(&common)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("ambiguous ID"));
+}
+
 #[test]
 fn tree_on_empty_repo_prints_nothing() {
     let temp = TempDir::new().unwrap();

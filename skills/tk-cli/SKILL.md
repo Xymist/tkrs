@@ -41,7 +41,18 @@ ID matching works for `show`, `start`, `close`, `edit`, etc.
 - `tree` -- print the full ticket tree, fully expanded, as plain text
   (`--status all|open|in-progress|closed`, default `open`); mirrors
   the `tui` tree pane's ordering and nesting; `--inverted` walks the
-  reversed graph, rooting at leaf work items and nesting dependants
+  reversed graph, rooting at leaf work items and nesting dependants;
+  `-r/--root <id>` restricts output to one ticket's subtree (partial
+  IDs accepted), with `--status` still applied to the root itself
+- `graph` -- print the ticket dependency graph as a Mermaid
+  `flowchart TD` to stdout (for sharing plans with nontechnical
+  stakeholders); takes the same `--status`, `--inverted`, and
+  `-r/--root` flags as `tree` but dedupes each ticket to a single
+  node while keeping every selection-passing edge, so a shared
+  dependency shows as one node with multiple incoming arrows instead
+  of repeating per branch; without `--root`, every selection-matching
+  ticket gets a node even when no root reaches it (rootless
+  dependency cycles still render)
 - `publish github <id> <owner/repo>` -- file the ticket as a GitHub
   issue via `gh` (see the `tk-to-github-issue` skill for the full
   workflow, including the required readability pass)
@@ -235,7 +246,10 @@ own issue forms, and the pinning/re-file semantics.
   for a flat view of every ticket regardless of dependency shape.
   `--inverted` flips the same nesting rule around dependants instead
   of dependencies, so an epic reachable from several leaf tickets
-  repeats once per work path.
+  repeats once per work path. `tk graph` covers the same data but
+  dedupes each ticket to a single node, so where `tk tree` repeats a
+  shared ticket once per branch, `tk graph` shows it once with every
+  incoming edge intact.
 
 ## When to Dispatch the `@tk-handler` Subagent
 

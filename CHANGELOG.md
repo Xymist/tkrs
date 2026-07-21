@@ -1,5 +1,25 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `tk tree --root <id>` (`-r`) restricts output to the single subtree
+  rooted at that ticket (partial IDs accepted), walked in the
+  requested orientation; `--status` still applies to the root itself,
+  so a root that fails the filter yields empty output.
+- `tk graph` prints the ticket dependency graph as a Mermaid
+  `flowchart TD` to stdout, for sharing project plans with
+  nontechnical stakeholders. It accepts the same `--status`,
+  `--inverted`, and `--root` flags as `tk tree`, but unlike `tk tree`
+  dedupes each ticket to a single node while keeping every
+  selection-passing edge that reaches it, so a diamond-shaped
+  dependency renders as one node with multiple incoming arrows.
+  Unrestricted graphs guarantee every selection-matching ticket a
+  node even when no root reaches it, so rootless dependency cycles
+  still render. Output opens with a `%%{init: ...}%%` directive
+  forcing straight, non-curved edges.
+
 ## [0.9.0] - 2026-07-20
 
 ### Added

@@ -64,31 +64,85 @@ pub fn assemble_ticket_forest(
     orientation: Orientation,
 ) -> Vec<TicketNode> {
     let lookup: HashMap<&str, &Ticket> = tickets.iter().map(|t| (t.id(), t)).collect();
-
-    let dependency_ids: HashSet<&str> = tickets
-        .iter()
-        .flat_map(|t| t.deps().iter().map(String::as_str))
-        .collect();
-
     let source = match orientation {
         Orientation::Normal => ChildSource::Deps(&lookup),
         Orientation::Inverted => ChildSource::Dependants(build_inverted_adjacency(tickets)),
     };
 
-    tickets
-        .iter()
-        .filter(|t| matches_selection(t, selection))
-        .filter(|t| is_root(t, orientation, &dependency_ids, &lookup))
-        .map(|ticket| {
-            let mut visited = HashSet::new();
-            visited.insert(ticket.id().to_string());
-            TicketNode {
-                id: ticket.id().to_string(),
-                summary: ticket.summary(),
-                children: children_recursively(ticket, &source, &mut visited, selection),
-            }
-        })
+    eligible_roots(tickets, selection, orientation, None, &lookup)
+        .into_iter()
+        .map(|ticket| build_root_node(ticket, &source, selection))
         .collect()
+}
+
+/// Builds the single subtree rooted at `root_id`, walked in the requested
+/// `orientation`. Every ticket whose id equals `root_id` becomes its own
+/// root, in slice order, mirroring [`assemble_ticket_forest`]'s duplicate-id
+/// handling. `selection` applies to the root exactly as it does to every
+/// other level: a root that fails the filter yields an empty forest.
+pub fn assemble_ticket_subtree(
+    tickets: &[Ticket],
+    selection: TicketSelection,
+    orientation: Orientation,
+    root_id: &str,
+) -> Vec<TicketNode> {
+    let lookup: HashMap<&str, &Ticket> = tickets.iter().map(|t| (t.id(), t)).collect();
+    let source = match orientation {
+        Orientation::Normal => ChildSource::Deps(&lookup),
+        Orientation::Inverted => ChildSource::Dependants(build_inverted_adjacency(tickets)),
+    };
+
+    eligible_roots(tickets, selection, orientation, Some(root_id), &lookup)
+        .into_iter()
+        .map(|ticket| build_root_node(ticket, &source, selection))
+        .collect()
+}
+
+/// The roots a forest walk starts from: every ticket matching `root_id` (in
+/// slice order) when given, otherwise every ticket eligible under
+/// `orientation`'s root rule. `selection` is applied to candidates in both
+/// cases.
+fn eligible_roots<'a>(
+    tickets: &'a [Ticket],
+    selection: TicketSelection,
+    orientation: Orientation,
+    root_id: Option<&str>,
+    lookup: &HashMap<&str, &'a Ticket>,
+) -> Vec<&'a Ticket> {
+    match root_id {
+        Some(id) => tickets
+            .iter()
+            .filter(|t| t.id() == id)
+            .filter(|t| matches_selection(t, selection))
+            .collect(),
+        None => {
+            let dependency_ids: HashSet<&str> = tickets
+                .iter()
+                .flat_map(|t| t.deps().iter().map(String::as_str))
+                .collect();
+            tickets
+                .iter()
+                .filter(|t| matches_selection(t, selection))
+                .filter(|t| is_root(t, orientation, &dependency_ids, lookup))
+                .collect()
+        }
+    }
+}
+
+/// Builds a fully expanded node for a single root ticket, seeding the
+/// per-root `visited` guard with the root itself.
+fn build_root_node(
+    ticket: &Ticket,
+    source: &ChildSource,
+    selection: TicketSelection,
+) -> TicketNode {
+    let mut visited = HashSet::new();
+    visited.insert(ticket.id().to_string());
+    TicketNode {
+        id: ticket.id().to_string(),
+        summary: ticket.summary(),
+        children: children_recursively(ticket, source, &mut visited, selection),
+    }
 }
 
 /// Where a node's children come from during the walk. Normal children are
@@ -180,6 +234,259 @@ fn matches_selection(ticket: &Ticket, selection: TicketSelection) -> bool {
         TicketSelection::InProgress => ticket.status() == &StatusValue::InProgress,
         TicketSelection::Closed => ticket.status() == &StatusValue::Closed,
     }
+}
+
+/// A single ticket node in an assembled [`TicketGraph`], deduped by id
+/// across the whole graph regardless of how many roots reach it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphNode {
+    pub id: String,
+    pub summary: String,
+}
+
+/// A single directed edge in an assembled [`TicketGraph`]. Direction is
+/// resolved at assembly time from the walk orientation (see
+/// [`assemble_ticket_graph`]) rather than carried here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphEdge {
+    pub from: String,
+    pub to: String,
+}
+
+/// The full ticket dependency graph: every selection-passing node reachable
+/// from the roots, deduped, and every selection-passing edge between them,
+/// deduped and in discovery order.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TicketGraph {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+}
+
+/// Assembles the ticket dependency graph for the given `orientation`,
+/// optionally restricted to the subtree rooted at `root_id` (same root
+/// resolution as [`assemble_ticket_subtree`] when `Some`, or
+/// [`assemble_ticket_forest`]'s root rule when `None`).
+///
+/// Unlike a forest, a node is defined once globally: a ticket reachable from
+/// more than one path (a diamond, or a dependency shared by two roots)
+/// appears exactly once in `nodes`, but every selection-passing edge that
+/// reaches it is still recorded in `edges`. A global `visited` set stops the
+/// walk from re-descending into an already-explored node (also terminating
+/// cycles), without dropping the edge that reached it again.
+///
+/// Edge direction always follows the walk itself (`from` = the node being
+/// expanded, `to` = its child from [`ChildSource::children_of`]), which
+/// resolves to `dependant --> dependency` under `Orientation::Normal` and
+/// `dependency --> dependant` under `Orientation::Inverted`.
+///
+/// Diverges from `tk tree`'s root eligibility in one case: when `root_id` is
+/// `None`, any selection-matching ticket the eligible-root walk never
+/// reaches -- a pure dependency cycle with no eligible root under either
+/// orientation, or a ticket whose only inbound edge comes from a ticket that
+/// fails `selection` -- would otherwise vanish from the graph entirely.
+/// After the eligible-root walk, every remaining selection-matching ticket
+/// not yet visited is swept in, in slice order, and walked the same way, so
+/// every selection-matching ticket appears as a node somewhere and every
+/// selection-passing edge between represented tickets is recorded. This
+/// fallback does not run when `root_id` is `Some`, so `--root` keeps
+/// restricting the graph to the requested subtree exactly as it restricts a
+/// `tk tree` subtree.
+pub fn assemble_ticket_graph(
+    tickets: &[Ticket],
+    selection: TicketSelection,
+    orientation: Orientation,
+    root_id: Option<&str>,
+) -> TicketGraph {
+    let lookup: HashMap<&str, &Ticket> = tickets.iter().map(|t| (t.id(), t)).collect();
+    let source = match orientation {
+        Orientation::Normal => ChildSource::Deps(&lookup),
+        Orientation::Inverted => ChildSource::Dependants(build_inverted_adjacency(tickets)),
+    };
+
+    let roots = eligible_roots(tickets, selection, orientation, root_id, &lookup);
+
+    let mut graph = TicketGraph::default();
+    let mut visited_nodes: HashSet<String> = HashSet::new();
+    let mut visited_edges: HashSet<(String, String)> = HashSet::new();
+
+    for root in roots {
+        // A duplicate root id only pushes the shared node once, but each
+        // duplicate ticket object still walks its own `deps()`, so the edge
+        // walk always runs regardless of whether the node push happened.
+        if visited_nodes.insert(root.id().to_string()) {
+            graph.nodes.push(GraphNode {
+                id: root.id().to_string(),
+                summary: root.summary(),
+            });
+        }
+        walk_graph_edges(
+            root,
+            &source,
+            selection,
+            &mut visited_nodes,
+            &mut visited_edges,
+            &mut graph,
+        );
+    }
+
+    if root_id.is_none() {
+        for ticket in tickets {
+            if !matches_selection(ticket, selection) {
+                continue;
+            }
+            // Unlike the eligible-root loop above, a ticket already reached
+            // by that walk is fully explored already, so the fallback both
+            // adds the node and walks its edges in one gate.
+            if visited_nodes.insert(ticket.id().to_string()) {
+                graph.nodes.push(GraphNode {
+                    id: ticket.id().to_string(),
+                    summary: ticket.summary(),
+                });
+                walk_graph_edges(
+                    ticket,
+                    &source,
+                    selection,
+                    &mut visited_nodes,
+                    &mut visited_edges,
+                    &mut graph,
+                );
+            }
+        }
+    }
+
+    graph
+}
+
+/// Records every selection-passing edge from `ticket` to its children,
+/// descending into a child only the first time it is seen (`visited_nodes`),
+/// so a repeat path still contributes its edge without re-walking a subtree
+/// that is already fully recorded.
+fn walk_graph_edges<'a>(
+    ticket: &'a Ticket,
+    source: &ChildSource<'a>,
+    selection: TicketSelection,
+    visited_nodes: &mut HashSet<String>,
+    visited_edges: &mut HashSet<(String, String)>,
+    graph: &mut TicketGraph,
+) {
+    for child in source.children_of(ticket) {
+        if !matches_selection(child, selection) {
+            continue;
+        }
+
+        let edge = (ticket.id().to_string(), child.id().to_string());
+        if !visited_edges.insert(edge.clone()) {
+            continue;
+        }
+        graph.edges.push(GraphEdge {
+            from: edge.0,
+            to: edge.1,
+        });
+
+        if visited_nodes.insert(child.id().to_string()) {
+            graph.nodes.push(GraphNode {
+                id: child.id().to_string(),
+                summary: child.summary(),
+            });
+            walk_graph_edges(
+                child,
+                source,
+                selection,
+                visited_nodes,
+                visited_edges,
+                graph,
+            );
+        }
+    }
+}
+
+/// Prints a [`TicketGraph`] to stdout as a Mermaid flowchart.
+pub fn print_mermaid(graph: &TicketGraph) {
+    print!("{}", render_mermaid(graph));
+}
+
+/// Mermaid init directive forcing straight (non-curved) edge rendering,
+/// emitted as the first line of every rendered graph.
+const MERMAID_INIT_DIRECTIVE: &str = r#"%%{init: {"flowchart": {"curve": "linear"}}}%%"#;
+
+/// Renders a [`TicketGraph`] as a Mermaid `flowchart TD`: the linear-curve
+/// init directive, the `flowchart TD` header, a 4-space-indented node
+/// definition block, a blank line, then a 4-space-indented edge block,
+/// terminated by a trailing newline. A graph with no nodes renders just the
+/// directive and header lines.
+pub fn render_mermaid(graph: &TicketGraph) -> String {
+    let mut out = format!("{MERMAID_INIT_DIRECTIVE}\nflowchart TD\n");
+    if graph.nodes.is_empty() {
+        return out;
+    }
+
+    let mermaid_ids = sanitize_mermaid_ids(&graph.nodes);
+
+    for node in &graph.nodes {
+        out.push_str(&format!(
+            "    {}[\"{}\"]\n",
+            mermaid_ids[&node.id],
+            escape_mermaid_label(&node.summary)
+        ));
+    }
+
+    if !graph.edges.is_empty() {
+        out.push('\n');
+        for edge in &graph.edges {
+            out.push_str(&format!(
+                "    {} --> {}\n",
+                mermaid_ids[&edge.from], mermaid_ids[&edge.to]
+            ));
+        }
+    }
+
+    out
+}
+
+/// Maps each node's ticket id to a Mermaid-safe id: [`sanitize_mermaid_id`]
+/// applied first, then a collision between two distinct ticket ids that
+/// sanitize to the same string is disambiguated with a numeric `_N` suffix,
+/// in node discovery order.
+fn sanitize_mermaid_ids(nodes: &[GraphNode]) -> HashMap<String, String> {
+    let mut mermaid_ids: HashMap<String, String> = HashMap::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for node in nodes {
+        let base = sanitize_mermaid_id(&node.id);
+        let mut candidate = base.clone();
+        let mut suffix = 1;
+        while !seen.insert(candidate.clone()) {
+            suffix += 1;
+            candidate = format!("{base}_{suffix}");
+        }
+        mermaid_ids.insert(node.id.clone(), candidate);
+    }
+
+    mermaid_ids
+}
+
+/// Sanitizes a ticket id into a Mermaid-safe node id: every character
+/// outside `[A-Za-z0-9_]` becomes `_`, and the result is always prefixed
+/// with `t_`. The prefix guards against three cases a bare sanitized id
+/// cannot: colliding with a Mermaid grammar keyword (a ticket literally
+/// named `end`), a leading digit, and an empty id.
+fn sanitize_mermaid_id(id: &str) -> String {
+    let mut sanitized = String::from("t_");
+    sanitized.extend(id.chars().map(|c| {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            c
+        } else {
+            '_'
+        }
+    }));
+    sanitized
+}
+
+/// Escapes a label for Mermaid's quoted node-text form. `#` must be escaped
+/// before `"` -- escaping `"` first would turn its own `#` into a second
+/// escape sequence.
+fn escape_mermaid_label(label: &str) -> String {
+    label.replace('#', "#35;").replace('"', "#quot;")
 }
 
 /// Prints a forest to stdout as a fully expanded plain-text tree, using the
@@ -316,6 +623,40 @@ mod tests {
     //   Open       -> selection_open_excludes_closed_at_top_level (open/in-progress true, closed false)
     //   InProgress -> selection_in_progress_includes_only_in_progress (in-progress true, others false)
     //   Closed     -> selection_closed_includes_only_closed (closed true, others false)
+    //
+    // Decision E -- subtree/graph root eligibility (`eligible_roots`'s `Some(id)`
+    // branch), two chained `.filter`s forming a short-circuit AND:
+    //   subroot(t) = (t.id() == id) && matches_selection(t, selection)
+    //   c1 = t.id() == id
+    //   c2 = matches_selection(t, selection)
+    // Independence pairs (outcome = becomes-a-subtree-root):
+    //   c1: (T,T)=root vs (F,T)=not-root
+    //       -> subtree_restricts_to_root_id_normal (rooted at "b": "b" matches
+    //          and passes -> root; "a"/"c" fail the id -> not roots, same fixture)
+    //   c2: (T,T)=root vs (T,F)=not-root
+    //       -> subtree_restricts_to_root_id_normal (T,T) vs
+    //          subtree_root_failing_status_filter_is_empty (closed "a" matches the
+    //          id but fails Open selection)
+    //
+    // Decision F -- `sanitize_mermaid_id`'s per-character keep test, an OR whose
+    // false decision maps the character to '_':
+    //   keep(c) = c.is_ascii_alphanumeric() || c == '_'
+    //   c1 = c.is_ascii_alphanumeric()
+    //   c2 = c == '_'
+    // Independence pairs (outcome = character-kept-verbatim):
+    //   c1: (T,-)=kept vs (F,F)=replaced
+    //       -> sanitize_mermaid_id_replaces_non_word_chars (alnum kept; '.'/'-'/'!' replaced)
+    //   c2: (F,T)=kept vs (F,F)=replaced
+    //       -> sanitize_mermaid_id_preserves_literal_underscore ('_' kept; '!' replaced)
+    //
+    // The `walk_graph_edges` and graph root-loop guards are single-condition
+    // (branch coverage only): the selection guard by
+    // graph_selection_excludes_filtered_node_and_its_edges; the visited_nodes
+    // re-descent guard's skip arm (record the edge, don't re-walk) by
+    // graph_diamond_preserves_both_edges_into_shared_dependency; the
+    // visited_edges dedup skip arm by graph_duplicate_edges_are_recorded_once;
+    // and the root-loop node dedup skip arm by
+    // graph_duplicate_root_ids_dedupe_node_but_keep_each_branch.
 
     #[test]
     fn dependency_is_never_a_root() {
@@ -715,5 +1056,398 @@ mod tests {
         let im = &find(&inverted, "l").children[0];
         assert_eq!(im.id, "m");
         assert_eq!(child_ids(im), vec!["e"]);
+    }
+
+    // --- Subtree assembly (--root) ------------------------------------------
+
+    #[test]
+    fn subtree_restricts_to_root_id_normal() {
+        // `b` is not a forest root (`a` depends on it), but assembling its
+        // subtree directly yields only `b` and its own dependency `c`.
+        let tickets = vec![
+            ticket("a", StatusValue::Open, 2, &["b"]),
+            ticket("b", StatusValue::Open, 2, &["c"]),
+            ticket("c", StatusValue::Open, 2, &[]),
+        ];
+        let subtree =
+            assemble_ticket_subtree(&tickets, TicketSelection::All, Orientation::Normal, "b");
+        assert_eq!(root_ids(&subtree), vec!["b"]);
+        assert_eq!(child_ids(&subtree[0]), vec!["c"]);
+    }
+
+    #[test]
+    fn subtree_restricts_to_root_id_inverted() {
+        // Inverted: rooting at `m` walks its dependants only (`e`), ignoring
+        // both `m`'s own dependency `l` and the rest of the forest.
+        let tickets = vec![
+            ticket("l", StatusValue::Open, 2, &[]),
+            ticket("m", StatusValue::Open, 2, &["l"]),
+            ticket("e", StatusValue::Open, 2, &["m"]),
+        ];
+        let subtree =
+            assemble_ticket_subtree(&tickets, TicketSelection::All, Orientation::Inverted, "m");
+        assert_eq!(root_ids(&subtree), vec!["m"]);
+        assert_eq!(child_ids(&subtree[0]), vec!["e"]);
+    }
+
+    #[test]
+    fn subtree_root_failing_status_filter_is_empty() {
+        // `selection` applies to the root exactly like every other level: a
+        // closed root under Open selection yields nothing, not a shallow tree.
+        let tickets = vec![
+            ticket("a", StatusValue::Closed, 2, &["b"]),
+            ticket("b", StatusValue::Open, 2, &[]),
+        ];
+        let subtree =
+            assemble_ticket_subtree(&tickets, TicketSelection::Open, Orientation::Normal, "a");
+        assert!(subtree.is_empty());
+    }
+
+    #[test]
+    fn subtree_duplicate_root_ids_each_keep_their_own_dependencies() {
+        // Mirrors duplicate_ids_keep_their_own_dependencies for the subtree
+        // path: both tickets sharing id "a" become their own root, in slice
+        // order, each walking its own deps().
+        let tickets = vec![
+            ticket("a", StatusValue::Open, 2, &["x"]),
+            ticket("a", StatusValue::Open, 2, &["y"]),
+            ticket("x", StatusValue::Open, 2, &[]),
+            ticket("y", StatusValue::Open, 2, &[]),
+        ];
+        let subtree =
+            assemble_ticket_subtree(&tickets, TicketSelection::All, Orientation::Normal, "a");
+        assert_eq!(root_ids(&subtree), vec!["a", "a"]);
+        assert_eq!(child_ids(&subtree[0]), vec!["x"]);
+        assert_eq!(child_ids(&subtree[1]), vec!["y"]);
+    }
+
+    #[test]
+    fn subtree_unknown_root_id_yields_empty() {
+        let tickets = vec![ticket("a", StatusValue::Open, 2, &[])];
+        let subtree =
+            assemble_ticket_subtree(&tickets, TicketSelection::All, Orientation::Normal, "ghost");
+        assert!(subtree.is_empty());
+    }
+
+    // --- Graph assembly ------------------------------------------------------
+
+    fn graph_node_ids(graph: &TicketGraph) -> Vec<&str> {
+        graph.nodes.iter().map(|n| n.id.as_str()).collect()
+    }
+
+    fn graph_edge_pairs(graph: &TicketGraph) -> Vec<(&str, &str)> {
+        graph
+            .edges
+            .iter()
+            .map(|e| (e.from.as_str(), e.to.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn graph_diamond_preserves_both_edges_into_shared_dependency() {
+        // A -> [B, C]; B -> D; C -> D. Unlike the forest, which collapses D
+        // under whichever branch reaches it first, the graph dedupes D as a
+        // single node but keeps both A->B->D and A->C->D edges into it.
+        let tickets = vec![
+            ticket("a", StatusValue::Open, 2, &["b", "c"]),
+            ticket("b", StatusValue::Open, 2, &["d"]),
+            ticket("c", StatusValue::Open, 2, &["d"]),
+            ticket("d", StatusValue::Open, 2, &[]),
+        ];
+        let graph =
+            assemble_ticket_graph(&tickets, TicketSelection::All, Orientation::Normal, None);
+        assert_eq!(graph_node_ids(&graph), vec!["a", "b", "d", "c"]);
+        assert_eq!(
+            graph_edge_pairs(&graph),
+            vec![("a", "b"), ("b", "d"), ("a", "c"), ("c", "d")]
+        );
+    }
+
+    #[test]
+    fn graph_edge_direction_normal_is_dependant_to_dependency() {
+        let tickets = vec![
+            ticket("l", StatusValue::Open, 2, &[]),
+            ticket("m", StatusValue::Open, 2, &["l"]),
+            ticket("e", StatusValue::Open, 2, &["m"]),
+        ];
+        let graph =
+            assemble_ticket_graph(&tickets, TicketSelection::All, Orientation::Normal, None);
+        assert_eq!(graph_edge_pairs(&graph), vec![("e", "m"), ("m", "l")]);
+    }
+
+    #[test]
+    fn graph_edge_direction_inverted_is_dependency_to_dependant() {
+        // Same fixture as the Normal case above: the arrow direction flips
+        // to leaf-first while the underlying edges are unchanged.
+        let tickets = vec![
+            ticket("l", StatusValue::Open, 2, &[]),
+            ticket("m", StatusValue::Open, 2, &["l"]),
+            ticket("e", StatusValue::Open, 2, &["m"]),
+        ];
+        let graph =
+            assemble_ticket_graph(&tickets, TicketSelection::All, Orientation::Inverted, None);
+        assert_eq!(graph_edge_pairs(&graph), vec![("l", "m"), ("m", "e")]);
+    }
+
+    #[test]
+    fn graph_restricts_to_root_id() {
+        let tickets = vec![
+            ticket("a", StatusValue::Open, 2, &["b"]),
+            ticket("b", StatusValue::Open, 2, &["c"]),
+            ticket("c", StatusValue::Open, 2, &[]),
+            ticket("z", StatusValue::Open, 2, &[]),
+        ];
+        let graph = assemble_ticket_graph(
+            &tickets,
+            TicketSelection::All,
+            Orientation::Normal,
+            Some("b"),
+        );
+        assert_eq!(graph_node_ids(&graph), vec!["b", "c"]);
+        assert_eq!(graph_edge_pairs(&graph), vec![("b", "c")]);
+    }
+
+    #[test]
+    fn graph_root_id_on_duplicate_ticket_ids_dedupes_node_but_keeps_each_branch() {
+        // The `Some(root_id)` branch of `eligible_roots` matches both tickets
+        // sharing id "a"; the root loop's visited_nodes guard pushes "a" once
+        // but still walks each duplicate's own deps() branch.
+        let tickets = vec![
+            ticket("a", StatusValue::Open, 2, &["x"]),
+            ticket("a", StatusValue::Open, 2, &["y"]),
+            ticket("x", StatusValue::Open, 2, &[]),
+            ticket("y", StatusValue::Open, 2, &[]),
+        ];
+        let graph = assemble_ticket_graph(
+            &tickets,
+            TicketSelection::All,
+            Orientation::Normal,
+            Some("a"),
+        );
+        assert_eq!(graph_node_ids(&graph), vec!["a", "x", "y"]);
+        assert_eq!(graph_edge_pairs(&graph), vec![("a", "x"), ("a", "y")]);
+    }
+
+    #[test]
+    fn graph_pure_cycle_with_no_root_is_still_represented_normal() {
+        // A -> B -> A has no eligible root under Normal (both are depended
+        // upon by the other), so the eligible-root walk finds nothing. The
+        // fallback sweep must still surface both nodes and both edges.
+        let tickets = vec![
+            ticket("a", StatusValue::Open, 2, &["b"]),
+            ticket("b", StatusValue::Open, 2, &["a"]),
+        ];
+        let graph =
+            assemble_ticket_graph(&tickets, TicketSelection::All, Orientation::Normal, None);
+        assert_eq!(graph_node_ids(&graph), vec!["a", "b"]);
+        assert_eq!(graph_edge_pairs(&graph), vec![("a", "b"), ("b", "a")]);
+    }
+
+    #[test]
+    fn graph_pure_cycle_with_no_root_is_still_represented_inverted() {
+        // Same cycle, inverted: neither ticket's own dep is unresolvable, so
+        // neither is an inverted root either; the fallback sweep applies the
+        // same way regardless of orientation.
+        let tickets = vec![
+            ticket("a", StatusValue::Open, 2, &["b"]),
+            ticket("b", StatusValue::Open, 2, &["a"]),
+        ];
+        let graph =
+            assemble_ticket_graph(&tickets, TicketSelection::All, Orientation::Inverted, None);
+        assert_eq!(graph_node_ids(&graph), vec!["a", "b"]);
+        assert_eq!(graph_edge_pairs(&graph), vec![("a", "b"), ("b", "a")]);
+    }
+
+    #[test]
+    fn graph_fallback_sweep_skips_nodes_already_reached_from_a_root() {
+        // `r` is a normal root reaching nothing; `a` <-> `b` is a rootless
+        // cycle elsewhere in the same store. The fallback sweep must add the
+        // cycle without duplicating `r`'s already-visited node/edges or
+        // re-walking `a`/`b` more than once each.
+        let tickets = vec![
+            ticket("r", StatusValue::Open, 2, &[]),
+            ticket("a", StatusValue::Open, 2, &["b"]),
+            ticket("b", StatusValue::Open, 2, &["a"]),
+        ];
+        let graph =
+            assemble_ticket_graph(&tickets, TicketSelection::All, Orientation::Normal, None);
+        assert_eq!(graph_node_ids(&graph), vec!["r", "a", "b"]);
+        assert_eq!(graph_edge_pairs(&graph), vec![("a", "b"), ("b", "a")]);
+    }
+
+    #[test]
+    fn graph_selection_excludes_filtered_node_and_its_edges() {
+        // `c` is closed; under Open selection it is dropped as a node and
+        // both the edge into it and its own edge to `d` never appear. `d`
+        // itself is Open and was never reached (its only path in was through
+        // the filtered-out `c`), so the fallback sweep surfaces it as its own
+        // disconnected node -- the same mechanism that recovers a rootless
+        // cycle applies to any unreached selection-matching ticket.
+        let tickets = vec![
+            ticket("a", StatusValue::Open, 2, &["b", "c"]),
+            ticket("b", StatusValue::Open, 2, &[]),
+            ticket("c", StatusValue::Closed, 2, &["d"]),
+            ticket("d", StatusValue::Open, 2, &[]),
+        ];
+        let graph =
+            assemble_ticket_graph(&tickets, TicketSelection::Open, Orientation::Normal, None);
+        assert_eq!(graph_node_ids(&graph), vec!["a", "b", "d"]);
+        assert_eq!(graph_edge_pairs(&graph), vec![("a", "b")]);
+    }
+
+    #[test]
+    fn graph_empty_when_no_tickets_match() {
+        let graph = assemble_ticket_graph(&[], TicketSelection::All, Orientation::Normal, None);
+        assert!(graph.nodes.is_empty());
+        assert!(graph.edges.is_empty());
+    }
+
+    #[test]
+    fn graph_duplicate_edges_are_recorded_once() {
+        // `walk_graph_edges`' visited_edges guard: a ticket naming the same dep
+        // twice yields the identical (from, to) edge twice; the second is
+        // dropped, so the edge and its target node each appear once.
+        let tickets = vec![
+            ticket("a", StatusValue::Open, 2, &["d", "d"]),
+            ticket("d", StatusValue::Open, 2, &[]),
+        ];
+        let graph =
+            assemble_ticket_graph(&tickets, TicketSelection::All, Orientation::Normal, None);
+        assert_eq!(graph_node_ids(&graph), vec!["a", "d"]);
+        assert_eq!(graph_edge_pairs(&graph), vec![("a", "d")]);
+    }
+
+    #[test]
+    fn graph_duplicate_root_ids_dedupe_node_but_keep_each_branch() {
+        // Two roots sharing id "a" (a hand-edited store) each contribute their
+        // own branch, but the root loop's visited_nodes guard pushes the shared
+        // "a" node only once.
+        let tickets = vec![
+            ticket("a", StatusValue::Open, 2, &["x"]),
+            ticket("a", StatusValue::Open, 2, &["y"]),
+            ticket("x", StatusValue::Open, 2, &[]),
+            ticket("y", StatusValue::Open, 2, &[]),
+        ];
+        let graph =
+            assemble_ticket_graph(&tickets, TicketSelection::All, Orientation::Normal, None);
+        assert_eq!(graph_node_ids(&graph), vec!["a", "x", "y"]);
+        assert_eq!(graph_edge_pairs(&graph), vec![("a", "x"), ("a", "y")]);
+    }
+
+    // --- Mermaid rendering -----------------------------------------------
+
+    #[test]
+    fn render_mermaid_matches_expected_layout() {
+        let graph = TicketGraph {
+            nodes: vec![
+                GraphNode {
+                    id: "tic-5bbab".into(),
+                    summary: "[P2] tic-5bbab: Mermaid graph output".into(),
+                },
+                GraphNode {
+                    id: "tic-cbc40".into(),
+                    summary: "[P2] tic-cbc40: Restrict tree output".into(),
+                },
+            ],
+            edges: vec![GraphEdge {
+                from: "tic-5bbab".into(),
+                to: "tic-cbc40".into(),
+            }],
+        };
+        assert_eq!(
+            render_mermaid(&graph),
+            "%%{init: {\"flowchart\": {\"curve\": \"linear\"}}}%%\n\
+             flowchart TD\n\
+             \x20   t_tic_5bbab[\"[P2] tic-5bbab: Mermaid graph output\"]\n\
+             \x20   t_tic_cbc40[\"[P2] tic-cbc40: Restrict tree output\"]\n\
+             \n\
+             \x20   t_tic_5bbab --> t_tic_cbc40\n"
+        );
+    }
+
+    #[test]
+    fn render_mermaid_empty_graph_is_directive_and_header_only() {
+        let graph = TicketGraph::default();
+        assert_eq!(
+            render_mermaid(&graph),
+            "%%{init: {\"flowchart\": {\"curve\": \"linear\"}}}%%\nflowchart TD\n"
+        );
+    }
+
+    #[test]
+    fn render_mermaid_node_with_no_edges_omits_edge_block() {
+        let graph = TicketGraph {
+            nodes: vec![GraphNode {
+                id: "a".into(),
+                summary: "[P2] a: Title a".into(),
+            }],
+            edges: Vec::new(),
+        };
+        assert_eq!(
+            render_mermaid(&graph),
+            "%%{init: {\"flowchart\": {\"curve\": \"linear\"}}}%%\n\
+             flowchart TD\n    t_a[\"[P2] a: Title a\"]\n"
+        );
+    }
+
+    #[test]
+    fn escape_mermaid_label_escapes_hash_before_quote() {
+        // Order matters: escaping `#` first keeps a literal `"` mapping only
+        // to `#quot;` instead of a doubly-escaped sequence.
+        assert_eq!(
+            escape_mermaid_label("titled \"epic\" #1"),
+            "titled #quot;epic#quot; #35;1"
+        );
+    }
+
+    #[test]
+    fn sanitize_mermaid_id_replaces_non_word_chars() {
+        assert_eq!(sanitize_mermaid_id("tic.5b-bab!"), "t_tic_5b_bab_");
+    }
+
+    #[test]
+    fn sanitize_mermaid_id_preserves_literal_underscore() {
+        // Decision F, c2=T: an existing underscore is kept verbatim rather than
+        // treated as a non-word character, while `!` still maps to `_`.
+        assert_eq!(sanitize_mermaid_id("a_b!"), "t_a_b_");
+    }
+
+    #[test]
+    fn sanitize_mermaid_id_prefixes_a_reserved_mermaid_token() {
+        // A ticket id that is itself a Mermaid grammar keyword (`end`) must
+        // not surface as a bare node id; the `t_` prefix guards it.
+        assert_eq!(sanitize_mermaid_id("end"), "t_end");
+    }
+
+    #[test]
+    fn sanitize_mermaid_id_prefixes_an_empty_id() {
+        assert_eq!(sanitize_mermaid_id(""), "t_");
+    }
+
+    #[test]
+    fn sanitize_mermaid_id_prefixes_a_leading_digit() {
+        // Without the prefix a leading digit would be a malformed identifier
+        // in some Mermaid renderers.
+        assert_eq!(sanitize_mermaid_id("123abc"), "t_123abc");
+    }
+
+    #[test]
+    fn sanitize_mermaid_ids_disambiguates_collisions() {
+        // Two distinct ticket ids that sanitize to the same string get a
+        // numeric suffix on the second (and later) occurrence, applied after
+        // the shared `t_` prefix.
+        let nodes = vec![
+            GraphNode {
+                id: "tic.a".into(),
+                summary: String::new(),
+            },
+            GraphNode {
+                id: "tic!a".into(),
+                summary: String::new(),
+            },
+        ];
+        let ids = sanitize_mermaid_ids(&nodes);
+        assert_eq!(ids["tic.a"], "t_tic_a");
+        assert_eq!(ids["tic!a"], "t_tic_a_2");
     }
 }

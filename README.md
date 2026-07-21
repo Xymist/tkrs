@@ -70,7 +70,24 @@ Claude Opus picks it up naturally from there. Other models may need additional g
   only once (at its first occurrence); `--inverted` walks the reversed
   graph instead — roots are leaf work items with no resolvable
   dependency, and each node nests the tickets that depend on it, so an
-  epic reachable from several leaves appears once per path
+  epic reachable from several leaves appears once per path;
+  `-r/--root <id>` restricts output to the single subtree rooted at
+  that ticket (partial IDs accepted), walked in the requested
+  orientation — `--status` still applies to the root itself, so a root
+  that fails the filter yields empty output
+- `tk graph` — print the ticket graph as a Mermaid `flowchart TD` to
+  stdout, for sharing project plans with nontechnical stakeholders;
+  accepts the same `-s/--status`, `--inverted`, and `-r/--root` flags
+  as `tk tree` and applies them identically, but unlike `tk tree` each
+  ticket is emitted as a single deduped node while every
+  selection-passing dependency edge reaching it is still recorded (so
+  a diamond-shaped dependency shows up as one node with two incoming
+  arrows); without `--root`, every selection-matching ticket is
+  guaranteed a node even when no root reaches it, so rootless
+  dependency cycles still render; edges point
+  `dependant --> dependency` by default and
+  `dependency --> dependant` under `--inverted`; the output opens with
+  a `%%{init: ...}%%` directive forcing straight (non-curved) edges
 - `tk publish github <id> <owner/repo>` — render a ticket as a GitHub
   issue-form submission and file it with `gh issue create` (nested like
   `dep`, so other publish targets can be added later); supports

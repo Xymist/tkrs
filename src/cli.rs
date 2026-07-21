@@ -13,7 +13,10 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::fs::write_ticket;
 use crate::publish::{self, GithubPublishArgs};
-use crate::tree::{Orientation, TicketSelection, assemble_ticket_forest, print_forest};
+use crate::tree::{
+    Orientation, TicketSelection, assemble_ticket_forest, assemble_ticket_graph,
+    assemble_ticket_subtree, print_forest, print_mermaid,
+};
 use crate::{
     LinkOp, RemovalOutcome, Ticket, TicketBody, apply_query_filter, build_link_plan, dep_add,
     find_ticket, git_user_name,
@@ -79,6 +82,8 @@ pub enum Command {
     Query(QueryArgs),
     #[command(about = "Print the full ticket tree, expanded, as plain text")]
     Tree(TreeArgs),
+    #[command(about = "Print the ticket graph as a Mermaid flowchart (top-down)")]
+    Graph(TreeArgs),
     #[command(about = "Publish a ticket to an external tracker")]
     Publish(PublishArgs),
     #[command(about = "Update tk to the latest release from GitHub")]
@@ -517,6 +522,13 @@ pub struct TreeArgs {
         help = "Walk the reversed dependency graph: roots are leaf work items, children are dependants"
     )]
     inverted: bool,
+
+    #[arg(
+        short = 'r',
+        long = "root",
+        help = "Restrict output to the subtree rooted at this ticket (partial ID accepted); --status still applies to the root itself, so a root that fails the filter yields empty output"
+    )]
+    root: Option<String>,
 }
 
 /// `tk publish <target>`: nested like `dep`, so further publish targets can
@@ -1361,8 +1373,30 @@ pub fn cmd_tree(args: TreeArgs) -> color_eyre::Result<()> {
     } else {
         Orientation::Normal
     };
-    let forest = assemble_ticket_forest(&tickets, args.status, orientation);
+    let forest = match &args.root {
+        Some(root) => {
+            let root_id = resolve_partial_id(&tickets, root)?;
+            assemble_ticket_subtree(&tickets, args.status, orientation, &root_id)
+        }
+        None => assemble_ticket_forest(&tickets, args.status, orientation),
+    };
     print_forest(&forest);
+    Ok(())
+}
+
+pub fn cmd_graph(args: TreeArgs) -> color_eyre::Result<()> {
+    let tickets = lock_tickets()?;
+    let orientation = if args.inverted {
+        Orientation::Inverted
+    } else {
+        Orientation::Normal
+    };
+    let root_id = match &args.root {
+        Some(root) => Some(resolve_partial_id(&tickets, root)?),
+        None => None,
+    };
+    let graph = assemble_ticket_graph(&tickets, args.status, orientation, root_id.as_deref());
+    print_mermaid(&graph);
     Ok(())
 }
 
