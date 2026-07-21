@@ -1,7 +1,7 @@
 ---
 id: tic-b949a
 type: task
-status: in_progress
+status: closed
 deps: []
 links:
 - tic-554ef
@@ -9,6 +9,7 @@ priority: 2
 assignee: Xymist
 tags: []
 created: 2026-07-20T18:07:28.145865194Z
+closed_at: 2026-07-21T21:29:24.707961144Z
 ---
 # Ticket tree assembly can hide components under status filters and cycles
 
@@ -29,3 +30,5 @@ Shared forest assembly (src/tree.rs, used by both tk tui and tk tree) has two lo
 - tk graph (v0.10.0) sidesteps quirk (1) for graphs: an unrestricted graph sweeps unreached selection-matching tickets as fallback roots, so filtered-gatekeeper deps and rootless cycles still render. tk tree and tk tui keep the documented forest semantics; this ticket remains for the shared assembly. @ 2026-07-21 19:01:30 UTC
 
 - [status_change: open -> in_progress] Fixing both quirks in shared assembly: SCC-seeded fallback roots per orientation + path-local visited with selection-before-visited ordering. @ 2026-07-21 20:42:29 UTC
+
+- [status_change: in_progress -> closed] Shipped in v0.11.0: SCC fallback sweep + path-local guard with sibling dedupe in the shared assembly; tree and tui both covered. Duplicate-id corners remain on tic-554ef; bounded expansion on tic-eda19. @ 2026-07-21 21:29:24 UTC
