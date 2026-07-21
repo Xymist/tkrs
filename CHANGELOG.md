@@ -1,5 +1,43 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- `tk tree` and `tk tui` no longer silently hide a selection-matching
+  ticket whose only dependant fails the status filter (e.g. an open
+  dependency of a closed ticket under the default open view) or that
+  belongs to a pure dependency cycle with no eligible root in either
+  direction (both apply symmetrically under `--inverted`, e.g. an open
+  epic whose only resolvable dependency is a closed leaf). The shared
+  forest assembly now sweeps every remaining selection-matching ticket
+  after the regular root walk and seeds it as an additional root when
+  it belongs to the appropriate strongly-connected component of a
+  selection-filtered view of the graph, so a ticket merely upstream
+  (`--inverted`) or downstream (normal) of a cycle is never wrongly
+  promoted to a standalone root ahead of the cycle itself -- it always
+  nests beneath the cycle's own fallback root instead. `tk tree
+  --root`'s scoped-inverted path now delegates to this same assembly
+  and no longer needs its own separate fallback sweep.
+
+### Changed
+
+- `tk tree` and `tk tui`'s cycle/repeat guard is now path-local
+  instead of per-root: a ticket is excluded from a branch only when it
+  is already on the *current* ancestor chain (still correctly
+  terminating a real dependency cycle, and still collapsing a
+  hand-edited duplicate dependency entry to a single sibling), not
+  merely because it appeared anywhere else in the same root's tree. A
+  dependency reachable through two distinct sibling branches of the
+  same root (a diamond) now repeats once under each branch, exactly
+  like a shared dependency already repeated once per top-level root.
+  The status filter is also now checked before this guard, so a
+  selection-failing ticket never occupies a slot that could otherwise
+  block a distinct, selection-passing ticket sharing its id from
+  rendering. Because a ticket now repeats once per distinct dependency
+  path, output can grow rapidly on a densely diamond-shaped dependency
+  graph; `tk graph` remains the deduped alternative for that case.
+
 ## [0.10.1] - 2026-07-21
 
 ### Fixed

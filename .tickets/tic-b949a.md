@@ -1,7 +1,7 @@
 ---
 id: tic-b949a
 type: task
-status: open
+status: in_progress
 deps: []
 links:
 - tic-554ef
@@ -27,3 +27,5 @@ Shared forest assembly (src/tree.rs, used by both tk tui and tk tree) has two lo
 - Both quirks apply symmetrically to the inverted orientation added in tic-67b8e (e.g. under the default open filter, an open epic whose only resolvable dep is a closed leaf vanishes from tk tree --inverted: the epic is not a root, and the closed leaf that would anchor it is filtered out). Fix in the shared assembly should cover both orientations. @ 2026-07-20 18:46:46 UTC
 
 - tk graph (v0.10.0) sidesteps quirk (1) for graphs: an unrestricted graph sweeps unreached selection-matching tickets as fallback roots, so filtered-gatekeeper deps and rootless cycles still render. tk tree and tk tui keep the documented forest semantics; this ticket remains for the shared assembly. @ 2026-07-21 19:01:30 UTC
+
+- [status_change: open -> in_progress] Fixing both quirks in shared assembly: SCC-seeded fallback roots per orientation + path-local visited with selection-before-visited ordering. @ 2026-07-21 20:42:29 UTC

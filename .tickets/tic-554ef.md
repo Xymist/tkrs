@@ -24,4 +24,4 @@ Reversed-file-order duplicate-id regressions (cyclic and acyclic, mixed status) 
 
 ## Notes
 
--
+- New repro from v0.11.0 review: rendering resolves deps via the unfiltered last-wins lookup while fallback eligibility uses a selection-filtered lookup, so with open r->x plus an open x AND a closed duplicate x, the renderer prunes the closed copy while the filtered SCC view sees x as non-eligible, omitting open x entirely (tree diverges from graph). Also: tui.rs Tree::new expect panics on duplicate top-level ids and add_child errors are swallowed by unwrap_or_default (blank pane) — harden the TUI boundary with path-qualified widget identifiers or load-time duplicate rejection. @ 2026-07-21 21:18:28 UTC

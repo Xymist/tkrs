@@ -65,12 +65,20 @@ Claude Opus picks it up naturally from there. Other models may need additional g
   text (same ordering and nesting as the `tk tui` tree pane, no
   colour); supports `-s/--status all|open|in-progress|closed` (default
   `open`); dependencies are omitted from the top level and nest under
-  their dependants instead — a shared dependency can appear under more
-  than one root, but within a single root's tree each ticket is shown
-  only once (at its first occurrence); `--inverted` walks the reversed
-  graph instead — roots are leaf work items with no resolvable
-  dependency, and each node nests the tickets that depend on it, so an
-  epic reachable from several leaves appears once per path;
+  their dependants instead — a shared dependency repeats once under
+  every root that depends on it, *and* once per branch within a single
+  root too (a diamond dependency shows up under both branches that
+  reach it, not just the first); every selection-matching ticket is
+  guaranteed to appear somewhere, cycles included — a pure dependency
+  cycle, or a ticket whose only dependant is filtered out (e.g. an
+  open dependency of a closed ticket under the default open view),
+  still renders as its own root instead of silently vanishing;
+  `--inverted` walks the reversed graph instead — roots are leaf work
+  items with no resolvable dependency, and each node nests the tickets
+  that depend on it, so an epic reachable from several leaves appears
+  once per path (the same completeness guarantee applies here too,
+  e.g. an open epic whose only resolvable dependency is a closed leaf
+  still renders);
   `-r/--root <id>` restricts output to a single ticket's *scope* — that
   ticket plus its selection-filtered dependency closure, exactly the
   set the normal-orientation walk reaches (partial IDs accepted;
@@ -78,7 +86,11 @@ Claude Opus picks it up naturally from there. Other models may need additional g
   the filter yields empty output); `--inverted` only changes how that
   fixed scope is presented — leaf-first, ascending back to the root —
   rather than changing which tickets are in scope, so a ticket outside
-  the scope that happens to depend on one of its members never appears
+  the scope that happens to depend on one of its members never appears.
+  Output repeats a ticket once per distinct dependency path reaching
+  it, so on a densely diamond-shaped dependency graph the tree can
+  grow rapidly (there is no truncation); prefer `tk graph` there,
+  since it dedupes each ticket to a single node
 - `tk graph` — print the ticket graph as a Mermaid `flowchart TD` to
   stdout, for sharing project plans with nontechnical stakeholders;
   accepts the same `-s/--status`, `--inverted`, and `-r/--root` flags

@@ -45,9 +45,9 @@ pub enum Orientation {
     Inverted,
 }
 
-/// Builds the forest of ticket trees for the given `orientation`. Root
-/// eligibility and the parent/child edge direction are both taken from the
-/// unfiltered dependency graph before `selection` is applied:
+/// Builds the forest of ticket trees for the given `orientation`. Regular
+/// root eligibility and the parent/child edge direction are both taken from
+/// the unfiltered dependency graph before `selection` is applied:
 ///
 /// - `Normal`: a ticket is a root unless some other ticket lists it as a
 ///   dependency; children of a node are its resolvable dependencies.
@@ -56,23 +56,89 @@ pub enum Orientation {
 ///   ticket in the slice); children of a node are the tickets that depend
 ///   on it.
 ///
-/// Within a single root's branch, a `visited` guard prevents the same
-/// ticket id from being added twice, which also covers dependency cycles.
+/// Within a single root's branch, a path-local guard (reset on unwind, not
+/// shared across siblings) prevents a ticket from being added twice along
+/// the *same* ancestor chain -- which still terminates a dependency cycle --
+/// while letting a ticket reachable from more than one branch of the same
+/// root (a diamond) repeat once per branch, exactly like it already repeats
+/// once per top-level root when two roots share a dependency.
+///
+/// Regular root eligibility being computed from the unfiltered graph can
+/// leave a selection-matching ticket unrepresented in two situations: its
+/// only dependant fails `selection` (an open dependency of a closed ticket
+/// never resurfaces once its filtered gatekeeper is gone), or it belongs to
+/// a pure dependency cycle with no eligible root in either direction (both
+/// apply symmetrically under `Inverted`, e.g. an open epic whose only
+/// resolvable dependency is a closed leaf). After the regular walk, every
+/// remaining selection-matching ticket that also belongs to the appropriate
+/// strongly-connected component of a selection-filtered view of the graph is
+/// swept in, in slice order, as an additional fallback root: `Inverted` uses
+/// [`is_in_sink_scc`] (a ticket whose own resolvable dependencies stay
+/// within its SCC); `Normal` uses the dual [`is_in_source_scc`] (a ticket
+/// whose dependants -- who depends on it -- stay within its SCC).
+/// Restricting the fallback to the right kind of SCC membership (rather than
+/// "not yet represented" alone) prevents a ticket merely upstream
+/// (`Inverted`) or downstream (`Normal`) of a cycle from being wrongly
+/// seeded as a second, standalone root before the cycle's own
+/// representative is reached -- it always arrives nested beneath the
+/// cycle's fallback root instead.
+///
+/// The rendered forest is path-expanded: a ticket appears once per distinct
+/// root-to-node dependency path reaching it, so node count is bounded by the
+/// number of simple paths through the graph, not the number of tickets --
+/// on a densely layered diamond graph this grows rapidly. [`TicketGraph`]
+/// (via [`assemble_ticket_graph`]) dedupes each ticket to a single node.
 pub fn assemble_ticket_forest(
     tickets: &[Ticket],
     selection: TicketSelection,
     orientation: Orientation,
 ) -> Vec<TicketNode> {
     let lookup: HashMap<&str, &Ticket> = tickets.iter().map(|t| (t.id(), t)).collect();
+    let adjacency = build_inverted_adjacency(tickets);
     let source = match orientation {
         Orientation::Normal => ChildSource::Deps(&lookup),
-        Orientation::Inverted => ChildSource::Dependants(build_inverted_adjacency(tickets)),
+        Orientation::Inverted => ChildSource::Dependants(&adjacency),
     };
 
-    eligible_roots(tickets, selection, orientation, None, &lookup)
-        .into_iter()
-        .map(|ticket| build_root_node(ticket, &source, selection))
-        .collect()
+    let mut forest: Vec<TicketNode> =
+        eligible_roots(tickets, selection, orientation, None, &lookup)
+            .into_iter()
+            .map(|ticket| build_root_node(ticket, &source, selection))
+            .collect();
+
+    let mut represented = HashSet::new();
+    collect_node_ids(&forest, &mut represented);
+
+    // The SCC eligibility checks run over a selection-filtered view: a
+    // ticket that fails `selection` contributes no edges to this analysis
+    // (mirroring how `children_recursively` already prunes past a filtered
+    // ticket), so a closed gatekeeper never masks a dependency that becomes
+    // structurally free once the gatekeeper itself is excluded.
+    let filtered_lookup: HashMap<&str, &Ticket> = tickets
+        .iter()
+        .filter(|t| matches_selection(t, selection))
+        .map(|t| (t.id(), t))
+        .collect();
+    let filtered_adjacency =
+        build_inverted_adjacency(tickets.iter().filter(|t| matches_selection(t, selection)));
+
+    for ticket in tickets {
+        if !matches_selection(ticket, selection) || represented.contains(ticket.id()) {
+            continue;
+        }
+        let eligible = match orientation {
+            Orientation::Normal => is_in_source_scc(ticket, &filtered_adjacency, &filtered_lookup),
+            Orientation::Inverted => is_in_sink_scc(ticket, &filtered_lookup),
+        };
+        if !eligible {
+            continue;
+        }
+        let node = build_root_node(ticket, &source, selection);
+        collect_node_ids(std::slice::from_ref(&node), &mut represented);
+        forest.push(node);
+    }
+
+    forest
 }
 
 /// Builds the tree for `--root root_id`. `--root` selects a *scope* --
@@ -91,14 +157,11 @@ pub fn assemble_ticket_forest(
 ///   re-runs the unrestricted [`assemble_ticket_forest`] in `Inverted`
 ///   orientation over the scope alone. The scope's own leaves become roots
 ///   and nesting grows toward `root_id`, so a ticket outside the scope that
-///   happens to depend on a scope member is never pulled in. Unlike the
-///   unrestricted `tk tree`/`tui` case, a scope whose bottom is a dependency
-///   cycle is never silently dropped: any not-yet-covered scope member that
-///   belongs to a sink strongly-connected component (see
-///   [`is_in_sink_scc`]) becomes an additional fallback root, in slice
-///   order, deterministically breaking the cycle. A ticket merely upstream
-///   of a cycle is excluded from that fallback -- it always arrives as a
-///   dependant nested beneath the cycle's own fallback root instead.
+///   happens to depend on a scope member is never pulled in.
+///   [`assemble_ticket_forest`] carries its own completeness guarantee (see
+///   its doc comment), so a scope whose bottom is a dependency cycle is
+///   still never silently dropped here, with no extra handling needed in
+///   this function.
 pub fn assemble_ticket_subtree(
     tickets: &[Ticket],
     selection: TicketSelection,
@@ -108,42 +171,11 @@ pub fn assemble_ticket_subtree(
     if orientation == Orientation::Inverted {
         let closure = assemble_ticket_subtree(tickets, selection, Orientation::Normal, root_id);
         let scope = scoped_tickets(tickets, &closure);
-        let mut forest = assemble_ticket_forest(&scope, selection, Orientation::Inverted);
-
-        // A scope whose bottom is a dependency cycle (every member has a
-        // resolvable in-scope dep) has no eligible inverted root at all, so
-        // the walk above would otherwise return empty and silently hide the
-        // whole scope. Sweep the scope, in slice order, for any
-        // selection-matching, not-yet-represented member that is also
-        // eligible (`is_in_sink_scc`), and give it its own root branch -- the
-        // per-root `visited` guard in `build_root_node` still terminates the
-        // cycle. Eligibility excludes a ticket merely upstream of a cycle
-        // (like an epic that depends into it): such a ticket is never a sink
-        // SCC member, so it is always represented as a dependant nested
-        // beneath the cycle's own fallback root instead of wrongly becoming
-        // a second, standalone root of its own. Each fallback root's own ids
-        // are folded back into `represented` immediately (not just the
-        // swept ticket's own id), so a later cycle member already covered by
-        // an earlier fallback root's branch is skipped instead of starting a
-        // second, redundant root.
-        let mut represented = HashSet::new();
-        collect_node_ids(&forest, &mut represented);
-
-        let scope_lookup: HashMap<&str, &Ticket> = scope.iter().map(|t| (t.id(), t)).collect();
-        let source = ChildSource::Dependants(build_inverted_adjacency(&scope));
-        for ticket in &scope {
-            if !matches_selection(ticket, selection)
-                || represented.contains(ticket.id())
-                || !is_in_sink_scc(ticket, &scope_lookup)
-            {
-                continue;
-            }
-            let node = build_root_node(ticket, &source, selection);
-            collect_node_ids(std::slice::from_ref(&node), &mut represented);
-            forest.push(node);
-        }
-
-        return forest;
+        // This delegates its fallback sweep to `assemble_ticket_forest`
+        // (see its doc comment for the sink-SCC-eligible sweep it carries),
+        // so a scope whose bottom is a dependency cycle is guaranteed
+        // complete: every scope member ends up represented, in slice order.
+        return assemble_ticket_forest(&scope, selection, Orientation::Inverted);
     }
 
     let lookup: HashMap<&str, &Ticket> = tickets.iter().map(|t| (t.id(), t)).collect();
@@ -189,7 +221,8 @@ fn collect_node_ids(nodes: &[TicketNode], ids: &mut HashSet<String>) {
 /// reach `ticket` back. A ticket with no resolvable in-scope dependency at
 /// all is vacuously eligible (its forward-reachable set is empty), though in
 /// practice such a leaf is already an ordinary `Inverted` root before the
-/// fallback sweep in [`assemble_ticket_subtree`] runs.
+/// fallback sweep in [`assemble_ticket_forest`] (also used by
+/// [`assemble_ticket_subtree`]'s `Inverted` branch) runs.
 ///
 /// This restricts the fallback sweep to genuine cycle (or singleton-leaf)
 /// members: a ticket merely upstream of a cycle has a resolvable dependency
@@ -214,8 +247,9 @@ fn is_in_sink_scc(ticket: &Ticket, scope_lookup: &HashMap<&str, &Ticket>) -> boo
 
 /// Every scope ticket id transitively reachable from `ticket` by following
 /// resolvable `deps()` edges: a plain worklist DFS. Scopes assembled for a
-/// single `--root` are small, so the O(n) traversal this performs per call
-/// (and the O(n^2) total across [`is_in_sink_scc`]'s callers) is fine.
+/// single `--root` (or a selection-filtered pass over the whole store) are
+/// small, so the O(n) traversal this performs per call (and the O(n^2) total
+/// across [`is_in_sink_scc`]'s callers) is fine.
 fn reachable_via_deps<'a>(
     ticket: &'a Ticket,
     scope_lookup: &HashMap<&str, &'a Ticket>,
@@ -229,6 +263,61 @@ fn reachable_via_deps<'a>(
             };
             if visited.insert(dep_id.clone()) {
                 stack.push(dep_ticket);
+            }
+        }
+    }
+    visited
+}
+
+/// True if `ticket` belongs to a source strongly-connected component of the
+/// raw dependency graph described by `adjacency` (dependants, as built by
+/// [`build_inverted_adjacency`]) and `lookup` (id -> ticket) -- every ticket
+/// transitively dependent on `ticket` can also be transitively reached back
+/// from `ticket`, both via the dependants relation. This is the `Normal`
+/// orientation's dual of [`is_in_sink_scc`]: a source SCC has no incoming
+/// edge from outside itself, so seeding one representative per source SCC as
+/// a fallback root never wrongly seeds a ticket that is merely downstream of
+/// a cycle (something the cycle depends on) -- such a ticket instead always
+/// arrives nested beneath the cycle's own fallback root, mirroring how
+/// [`is_in_sink_scc`] excludes a ticket upstream of an inverted cycle.
+///
+/// As with [`is_in_sink_scc`], a ticket with no resolvable in-scope
+/// dependant at all is vacuously eligible, and duplicate-id tickets are
+/// resolved against whichever single instance `lookup` keeps (last wins).
+fn is_in_source_scc<'a>(
+    ticket: &'a Ticket,
+    adjacency: &HashMap<&str, Vec<&'a Ticket>>,
+    lookup: &HashMap<&str, &'a Ticket>,
+) -> bool {
+    let forward = reachable_via_dependants(ticket, adjacency);
+    forward.iter().all(|id| {
+        let Some(other) = lookup.get(id.as_str()).copied() else {
+            // Invariant: `forward` only ever contains ids reached through
+            // `adjacency`'s ticket references, all of which are members of
+            // `lookup` too (built from the same, already-filtered tickets).
+            return true;
+        };
+        reachable_via_dependants(other, adjacency).contains(ticket.id())
+    })
+}
+
+/// Every ticket id transitively dependent on `ticket` -- reachable by
+/// repeatedly following `adjacency` (the dependants relation, the mirror of
+/// [`reachable_via_deps`]'s `deps()` walk): a plain worklist DFS with the
+/// same complexity note.
+fn reachable_via_dependants<'a>(
+    ticket: &'a Ticket,
+    adjacency: &HashMap<&str, Vec<&'a Ticket>>,
+) -> HashSet<String> {
+    let mut visited = HashSet::new();
+    let mut stack = vec![ticket];
+    while let Some(current) = stack.pop() {
+        let Some(dependants) = adjacency.get(current.id()) else {
+            continue;
+        };
+        for &dependant in dependants {
+            if visited.insert(dependant.id().to_string()) {
+                stack.push(dependant);
             }
         }
     }
@@ -267,18 +356,18 @@ fn eligible_roots<'a>(
 }
 
 /// Builds a fully expanded node for a single root ticket, seeding the
-/// per-root `visited` guard with the root itself.
+/// path-local ancestor guard with the root itself.
 fn build_root_node(
     ticket: &Ticket,
     source: &ChildSource,
     selection: TicketSelection,
 ) -> TicketNode {
-    let mut visited = HashSet::new();
-    visited.insert(ticket.id().to_string());
+    let mut path = HashSet::new();
+    path.insert(ticket.id().to_string());
     TicketNode {
         id: ticket.id().to_string(),
         summary: ticket.summary(),
-        children: children_recursively(ticket, source, &mut visited, selection),
+        children: children_recursively(ticket, source, &mut path, selection),
     }
 }
 
@@ -287,7 +376,7 @@ fn build_root_node(
 /// tickets sharing a duplicate id each keep their own dependency list.
 enum ChildSource<'a> {
     Deps(&'a HashMap<&'a str, &'a Ticket>),
-    Dependants(HashMap<&'a str, Vec<&'a Ticket>>),
+    Dependants(&'a HashMap<&'a str, Vec<&'a Ticket>>),
 }
 
 impl<'a> ChildSource<'a> {
@@ -309,8 +398,12 @@ impl<'a> ChildSource<'a> {
 
 /// Adjacency for the inverted orientation: each ticket maps to its
 /// dependants, in input slice order (a dependant is pushed onto every
-/// dependency it names, in the order it is visited).
-fn build_inverted_adjacency(tickets: &[Ticket]) -> HashMap<&str, Vec<&Ticket>> {
+/// dependency it names, in the order it is visited). Generic over any
+/// iterator of ticket references so callers can build adjacency over a
+/// filtered subset (e.g. only selection-passing tickets) without cloning.
+fn build_inverted_adjacency<'a>(
+    tickets: impl IntoIterator<Item = &'a Ticket>,
+) -> HashMap<&'a str, Vec<&'a Ticket>> {
     let mut adjacency: HashMap<&str, Vec<&Ticket>> = HashMap::new();
     for ticket in tickets {
         for dep_id in ticket.deps() {
@@ -335,30 +428,66 @@ fn is_root(
     }
 }
 
+/// Walks `ticket`'s children (per `source`), pruning only a candidate
+/// already on the *current* ancestor `path` -- not one merely visited
+/// elsewhere in this root's tree -- so a real dependency cycle still
+/// terminates while a diamond (the same ticket reachable through two
+/// distinct branches under the same root) renders once under each branch,
+/// exactly like a shared dependency already repeats once per top-level
+/// root. `path` is extended immediately before recursing into a child and
+/// shrunk back immediately once that child's own recursion returns (not
+/// deferred until every sibling is processed), so it always reflects
+/// strictly the ancestor chain from the root down to the current frame --
+/// never anything from an already-finished sibling branch, which would
+/// otherwise block a *different* branch that legitimately reaches the same
+/// ticket by a different path.
+///
+/// A separate `seen` set, local to this one call and never shared with any
+/// recursive call, collapses a literal duplicate edge within the *same*
+/// `children_of(ticket)` list (a hand-edited `deps: [b, b]`, or a duplicate
+/// dependant edge under `Inverted`) to a single sibling, without touching
+/// `path` and so without affecting cycle detection or cross-branch repeats.
+///
+/// `matches_selection` is checked before `seen` and `path`, not after: a
+/// selection-failing candidate is rejected without ever occupying either
+/// slot, so it can never block a distinct, selection-passing ticket that
+/// happens to share its id (e.g. a duplicate-id store where a closed and an
+/// open ticket of the same id are both dependants of the same dependency)
+/// from being rendered when its turn comes.
 fn children_recursively<'a>(
     ticket: &'a Ticket,
     source: &ChildSource<'a>,
-    visited: &mut HashSet<String>,
+    path: &mut HashSet<String>,
     selection: TicketSelection,
 ) -> Vec<TicketNode> {
     let mut children = Vec::new();
+    let mut seen = HashSet::new();
 
     for child in source.children_of(ticket) {
-        // Guard against cycles and repeated edges so a ticket is never
-        // inserted more than once within the same branch.
-        if !visited.insert(child.id().to_string()) {
+        if !matches_selection(child, selection) {
             continue;
         }
 
-        if !matches_selection(child, selection) {
+        // Collapse a literal duplicate edge within this one child list (a
+        // hand-edited `deps: [b, b]`, or a duplicate dependant edge under
+        // `Inverted`) to a single sibling. `seen` is local to this call --
+        // it never affects `path`, so it cannot mask a *different* branch
+        // that legitimately reaches the same ticket (see `path` below).
+        if !seen.insert(child.id().to_string()) {
+            continue;
+        }
+
+        if !path.insert(child.id().to_string()) {
             continue;
         }
 
         children.push(TicketNode {
             id: child.id().to_string(),
             summary: child.summary(),
-            children: children_recursively(child, source, visited, selection),
+            children: children_recursively(child, source, path, selection),
         });
+
+        path.remove(child.id());
     }
 
     children
@@ -452,9 +581,10 @@ pub fn assemble_ticket_graph(
     }
 
     let lookup: HashMap<&str, &Ticket> = tickets.iter().map(|t| (t.id(), t)).collect();
+    let adjacency = build_inverted_adjacency(tickets);
     let source = match orientation {
         Orientation::Normal => ChildSource::Deps(&lookup),
-        Orientation::Inverted => ChildSource::Dependants(build_inverted_adjacency(tickets)),
+        Orientation::Inverted => ChildSource::Dependants(&adjacency),
     };
 
     let roots = eligible_roots(tickets, selection, orientation, root_id, &lookup);
@@ -744,17 +874,61 @@ mod tests {
     //
     // Decision B -- inside `children_recursively`, a candidate (already resolved
     // to a `&Ticket` by `ChildSource::children_of`) is added as a child iff
-    // (short-circuit `continue`s):
-    //   child(c) = visited.insert(c) && matches_selection(c, selection)
-    //   c1 = visited.insert(c)                   [c not yet seen in this root's walk]
-    //   c2 = matches_selection(c, selection)
-    // Independence pairs (outcome = candidate-is-a-child):
-    //   c1: (T,T)=child vs (F,-)=skipped
-    //       -> repeated_dependency_within_a_root_is_collapsed_once ("d" kept under "b", pruned under "c")
-    //          (inverted analogue: inverted_shared_dependant_collapses_within_a_root)
-    //   c2: (T,T)=child vs (T,F)=skipped
-    //       -> selection_filters_nested_dependencies ("o"/"p" kept, closed "c" pruned)
+    // (short-circuit `continue`s, in this order):
+    //   child(c) = matches_selection(c, selection) && seen.insert(c) && path.insert(c)
+    //   c1 = matches_selection(c, selection)     [c passes the status filter]
+    //   c2 = seen.insert(c)                       [c not already emitted from
+    //                                              THIS SAME children_of()
+    //                                              call -- a fresh set per
+    //                                              call, never shared with
+    //                                              recursion, so it dedupes a
+    //                                              literal duplicate edge
+    //                                              without touching `path`]
+    //   c3 = path.insert(c)                       [c not already on the
+    //                                              CURRENT ancestor path --
+    //                                              path-local, not per-root:
+    //                                              inserted immediately
+    //                                              before recursing into c
+    //                                              and removed immediately
+    //                                              after c's own recursion
+    //                                              returns, before the next
+    //                                              sibling is considered]
+    // Independence pairs (outcome = candidate-is-a-child), each held against
+    // the (F,F,F)=emit baseline realized by an ordinary kept child in the
+    // cited fixture:
+    //   c1: (T,F,F)=skipped vs (F,F,F)=child
+    //       -> selection_filters_nested_dependencies ("o"/"p" kept, closed "c"
+    //          rejected before `seen`/`path` are ever touched)
     //          (inverted analogue: inverted_open_selection_prunes_closed_dependant)
+    //   c2: (F,T,F)=skipped vs (F,F,F)=child
+    //       -> duplicate_dependency_entry_renders_as_a_single_sibling (the
+    //          second "b" in `deps: [b, b]` is rejected by `seen` alone,
+    //          without ever reaching `path`) and its inverted mirror
+    //          inverted_duplicate_dependant_edge_renders_as_a_single_sibling
+    //   c3: (F,F,T)=skipped vs (F,F,F)=child
+    //       -> dependency_cycle_terminates_without_repeating (back-edge to "a"
+    //          passes selection and is the only occurrence in this call's own
+    //          children list, so `seen` passes too, but "a" is already on the
+    //          ancestor path -- a real cycle)
+    //          (inverted analogue: inverted_dependency_cycle_terminates_without_repeating)
+    // `path` being scoped to the ancestor chain and shrunk back immediately
+    // per child (not deferred until every sibling is processed) is what lets
+    // a ticket reachable through two *distinct* branches under the same root
+    // repeat once per branch instead of being wrongly collapsed to one: an
+    // id removed from `path` the instant its own branch finishes is free
+    // again for an unrelated, later branch to reach independently. Locked by
+    // diamond_within_a_root_repeats_the_shared_dependency_under_each_branch,
+    // its inverted mirror
+    // inverted_diamond_within_a_root_repeats_the_shared_dependant_under_each_branch,
+    // and (for the case where the shared descendant is listed as a *direct*
+    // sibling edge as well as reachable through another sibling, so
+    // `path`-removal timing specifically matters)
+    // diamond_via_siblings_renders_identically_regardless_of_dep_order. The
+    // c1-before-c2/c3 ordering -- a selection-failing candidate must not
+    // occupy either slot -- is locked by
+    // inverted_selection_failing_duplicate_id_dependant_does_not_block_open_copy
+    // (a `seen`-then-`path` slot that a selection-failing duplicate-id
+    // dependant must not consume).
     // The separate single-condition decision in `ChildSource::children_of`'s
     // `Deps` arm (a dep id resolves via `lookup`) drops unknown dep ids before
     // the walk; branch coverage: dependency_missing_from_lookup_is_skipped.
@@ -831,18 +1005,25 @@ mod tests {
     // (Inverted). Its Inverted branch body then runs the two-condition
     // fallback sweep enumerated as Decision H below.
     //
-    // Decision H -- `assemble_ticket_subtree`'s Inverted fallback-sweep skip
-    // guard, an OR of three independent conditions (c3 excludes a ticket
-    // merely upstream of a cycle: it reaches a sink SCC via its deps without
-    // belonging to one, so it must be rendered beneath the cycle's branch
-    // rather than seeded as a standalone root):
+    // Decision H -- `assemble_ticket_subtree`'s Inverted branch no longer
+    // carries its own fallback sweep: it delegates to `assemble_ticket_forest`
+    // over the `--root`-scoped slice, so the skip guard exercised here is
+    // Decision J's, evaluated in the Inverted arm over a scope whose
+    // `filtered_lookup` is that scope's selection-filtered id->ticket map. The
+    // subtree_root_id_inverted_* tests below are therefore a second,
+    // `--root`-scoped MC/DC pass over Decision J's guard (and, through c3, over
+    // `is_in_sink_scc` -- Decision I). The guard is the same OR of three
+    // independent conditions (c3 excludes a ticket merely upstream of a cycle:
+    // it reaches a sink SCC via its deps without belonging to one, so it must
+    // be rendered beneath the cycle's branch rather than seeded as a standalone
+    // root):
     //   skip(t) = !matches_selection(t, selection)
     //             || represented.contains(t.id())
-    //             || !is_in_sink_scc(t, scope_lookup)
+    //             || !is_in_sink_scc(t, filtered_lookup)
     //   c1 = !matches_selection(t, selection)    [t fails the status filter]
     //   c2 = represented.contains(t.id())        [t is already covered by an
     //                                             earlier root's branch]
-    //   c3 = !is_in_sink_scc(t, scope_lookup)    [t is not part of a sink SCC:
+    //   c3 = !is_in_sink_scc(t, filtered_lookup) [t is not part of a sink SCC:
     //                                             it has a resolvable dep that
     //                                             can never reach it back]
     // The false decision emits `t` as an additional fallback root;
@@ -902,11 +1083,71 @@ mod tests {
     //   c false for some member (fold F) => not-sink
     //       -> subtree_root_id_inverted_epic_upstream_of_cycle_is_not_a_standalone_root
     //          ("r" reaches "a"/"b" but neither reaches "r" back, so
-    //          is_in_sink_scc is false and "r" is excluded from the sweep)
+    //          is_in_sink_scc is false and "r" is excluded from the sweep) and,
+    //          directly at the forest level (no `--root` scoping),
+    //          cycle_with_upstream_dep_seeds_at_cycle_not_standalone_inverted
     // The vacuous empty-forward arm (all() over [] = true) never reaches the
     // sweep -- such a leaf is already an eligible Inverted root, represented
     // before c3 is evaluated -- so it is exercised directly by
     // is_in_sink_scc_leaf_with_empty_forward_set_is_vacuously_true.
+    //
+    // Decision J -- `assemble_ticket_forest`'s own fallback-sweep skip guard,
+    // generalizing Decision H's shape to both orientations and the
+    // unrestricted case over a freshly selection-filtered lookup/adjacency
+    // (rather than a `--root`-scoped one) -- an OR of three independent
+    // conditions:
+    //   skip(t) = !matches_selection(t, selection)
+    //             || represented.contains(t.id())
+    //             || !eligible(t, orientation)
+    //   c1 = !matches_selection(t, selection)
+    //   c2 = represented.contains(t.id())
+    //   c3 = !eligible(t, orientation)   [is_in_sink_scc under Inverted,
+    //                                    is_in_source_scc under Normal]
+    // Independence pairs (outcome = t is skipped), each held against a
+    // (F,F,F)=emit baseline:
+    //   c1: (T,F,F)=skip vs (F,F,F)=emit
+    //       -> open_dep_of_closed_dependant_appears_as_fallback_root_normal
+    //          (closed "c" skipped by !matches_selection; open "d" emitted)
+    //          and its inverted mirror
+    //          open_dep_of_closed_dependant_appears_as_fallback_root_inverted
+    //          (closed "l" skipped; open "e" emitted)
+    //   c2: (F,T,F)=skip vs (F,F,F)=emit
+    //       -> pure_cycle_with_no_root_renders_normal ("b" already
+    //          represented by "a"'s own branch -> skipped; "a" emitted) and
+    //          inverted_pure_cycle_with_no_root_renders (same shape, Inverted)
+    //   c3: (F,F,T)=skip vs (F,F,F)=emit
+    //       -> cycle_with_downstream_dep_seeds_at_cycle_not_standalone_normal
+    //          ("z" is downstream of the cycle -- something depends on it,
+    //          but it depends on nothing back -- so is_in_source_scc is
+    //          false and "z" is excluded; "a" is emitted). c3's Inverted arm
+    //          (!is_in_sink_scc) is mirrored directly by
+    //          cycle_with_upstream_dep_seeds_at_cycle_not_standalone_inverted
+    //          ("r" is upstream of cycle a<->b, reaching it via deps without
+    //          being reached back, so is_in_sink_scc is false and "r" is
+    //          excluded; "a" is emitted) and, over a `--root`-scoped input, by
+    //          subtree_root_id_inverted_epic_upstream_of_cycle_is_not_a_standalone_root
+    //          (Decision H).
+    //
+    // Decision K -- `is_in_source_scc`'s back-reachability check, the
+    // `Normal`-orientation mirror of Decision I (same `.all()`-fold shape,
+    // walking `adjacency`/dependants instead of `scope_lookup`/deps; the
+    // `let Some(other) = .. else` guard is the same dead-defensive
+    // invariant, not an independent condition):
+    //   source(t) = reachable_via_dependants(t).all(|id|
+    //                   reachable_via_dependants(lookup[id]).contains(t.id()))
+    // Fold rows (outcome = t-is-in-a-source-SCC):
+    //   c true for every member (fold T) => source
+    //       -> pure_cycle_with_no_root_renders_normal ("a" in the a<->b
+    //          cycle: both forward-dependant members reach it back)
+    //   c false for some member (fold F) => not-source
+    //       -> cycle_with_downstream_dep_seeds_at_cycle_not_standalone_normal
+    //          ("z" is reached by "a" via dependants, but nothing depends on
+    //          "a" back through "z", so the fold fails)
+    // The vacuous empty-forward arm (all() over [] = true), mirroring
+    // Decision I's own vacuous arm, is exercised directly (not through the
+    // full sweep -- such a ticket is already an ordinary `Normal` root
+    // before the sweep runs) by
+    // is_in_source_scc_leaf_with_empty_forward_set_is_vacuously_true.
 
     #[test]
     fn dependency_is_never_a_root() {
@@ -935,9 +1176,11 @@ mod tests {
     }
 
     #[test]
-    fn repeated_dependency_within_a_root_is_collapsed_once() {
-        // A -> [B, C]; B -> D; C -> D. The per-root visited set is consumed by
-        // B's branch, so D does not reappear under C within the same root.
+    fn diamond_within_a_root_repeats_the_shared_dependency_under_each_branch() {
+        // A -> [B, C]; B -> D; C -> D. The path-local guard only tracks the
+        // current ancestor chain, so D is not "on the path" once B's branch
+        // unwinds -- it renders once under B and again under C, exactly like
+        // a shared dependency already repeats once per top-level root.
         let tickets = vec![
             ticket("a", StatusValue::Open, 2, &["b", "c"]),
             ticket("b", StatusValue::Open, 2, &["d"]),
@@ -948,10 +1191,76 @@ mod tests {
         let a = find(&forest, "a");
         assert_eq!(child_ids(a), vec!["b", "c"]);
         assert_eq!(child_ids(&a.children[0]), vec!["d"]);
-        assert!(
-            a.children[1].children.is_empty(),
-            "d must not reappear under c within root a"
+        assert_eq!(
+            child_ids(&a.children[1]),
+            vec!["d"],
+            "d must repeat under c too, not just under b"
         );
+    }
+
+    #[test]
+    fn diamond_via_siblings_renders_identically_regardless_of_dep_order() {
+        // Order-sensitivity regression: `e` depends on both `x` and `y`, and
+        // `y` also depends on `x` (two paths reach `x`: directly from `e`,
+        // and via `y`). `x` must appear once directly under `e` and once
+        // nested under `y` in EITHER order `e` lists its own deps in -- a
+        // `path` guard that removed a child's id only after every sibling
+        // finished (rather than immediately after that child's own
+        // recursion returns) would incorrectly block the nested occurrence
+        // whenever `x` happened to be listed before `y`, since `x` would
+        // still be "on the path" for the whole rest of `e`'s loop. This is
+        // exactly the shape `tk create --parent` plus inter-child deps
+        // produces, and `tk dep` sorts deps lexically, so both orders occur
+        // in real stores.
+        let x_listed_first = vec![
+            ticket("e", StatusValue::Open, 2, &["x", "y"]),
+            ticket("x", StatusValue::Open, 2, &[]),
+            ticket("y", StatusValue::Open, 2, &["x"]),
+        ];
+        let forest =
+            assemble_ticket_forest(&x_listed_first, TicketSelection::All, Orientation::Normal);
+        let e = find(&forest, "e");
+        assert_eq!(child_ids(e), vec!["x", "y"]);
+        assert_eq!(
+            child_ids(&e.children[1]),
+            vec!["x"],
+            "x must also nest under y when x is listed first"
+        );
+
+        let y_listed_first = vec![
+            ticket("e", StatusValue::Open, 2, &["y", "x"]),
+            ticket("x", StatusValue::Open, 2, &[]),
+            ticket("y", StatusValue::Open, 2, &["x"]),
+        ];
+        let forest =
+            assemble_ticket_forest(&y_listed_first, TicketSelection::All, Orientation::Normal);
+        let e = find(&forest, "e");
+        assert_eq!(child_ids(e), vec!["y", "x"]);
+        assert_eq!(
+            child_ids(&e.children[0]),
+            vec!["x"],
+            "x must also nest under y when y is listed first"
+        );
+    }
+
+    #[test]
+    fn duplicate_dependency_entry_renders_as_a_single_sibling() {
+        // A hand-edited store can list the same dependency twice in one
+        // ticket's own deps (`deps: [b, b]`). `ChildSource::Deps` resolves
+        // both entries to the identical `b` object, so the same sibling
+        // literally appears twice in one `children_of(a)` call. The
+        // path-local guard must still collapse this to a single sibling --
+        // deferring `path`'s removal until the whole call (not each child)
+        // finishes is what keeps the second occurrence from finding an
+        // empty slot and rendering `b` twice under the same parent, which
+        // `tui-tree-widget` would reject as a duplicate sibling identifier.
+        let tickets = vec![
+            ticket("a", StatusValue::Open, 2, &["b", "b"]),
+            ticket("b", StatusValue::Open, 2, &[]),
+        ];
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Normal);
+        assert_eq!(root_ids(&forest), vec!["a"]);
+        assert_eq!(child_ids(&forest[0]), vec!["b"]);
     }
 
     #[test]
@@ -981,6 +1290,72 @@ mod tests {
         let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Normal);
         assert_eq!(root_ids(&forest), vec!["a"]);
         assert!(forest[0].children.is_empty());
+    }
+
+    #[test]
+    fn pure_cycle_with_no_root_renders_normal() {
+        // A <-> B has no eligible root under Normal (both are depended upon
+        // by the other), so the regular walk finds nothing. Quirk 1(b): the
+        // fallback sweep's source-SCC eligibility check still surfaces the
+        // whole cycle, seeded once, with the back-edge pruned.
+        let tickets = vec![
+            ticket("a", StatusValue::Open, 2, &["b"]),
+            ticket("b", StatusValue::Open, 2, &["a"]),
+        ];
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Normal);
+        assert_eq!(root_ids(&forest), vec!["a"]);
+        assert_eq!(child_ids(&forest[0]), vec!["b"]);
+        assert!(
+            forest[0].children[0].children.is_empty(),
+            "back-edge to a must be pruned"
+        );
+    }
+
+    #[test]
+    fn open_dep_of_closed_dependant_appears_as_fallback_root_normal() {
+        // Quirk 1(a): `c` (closed) depends on `d` (open). Under the default
+        // Open view `c` is invisible, but the unfiltered `is_root` check
+        // still disqualifies `d` from being a root, since something (`c`)
+        // does depend on it -- even though that something is now gone from
+        // view. Without the fallback sweep `d` would silently vanish; the
+        // sweep's source-SCC check is vacuously true once the filtered-out
+        // `c` contributes no edges, so `d` is seeded as its own root.
+        let tickets = vec![
+            ticket("c", StatusValue::Closed, 2, &["d"]),
+            ticket("d", StatusValue::Open, 2, &[]),
+        ];
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::Open, Orientation::Normal);
+        assert_eq!(root_ids(&forest), vec!["d"]);
+        assert!(forest[0].children.is_empty());
+    }
+
+    #[test]
+    fn cycle_with_downstream_dep_seeds_at_cycle_not_standalone_normal() {
+        // Invariant: a ticket downstream of a cycle (something the cycle
+        // depends on) is never seeded as a standalone fallback root; it
+        // nests beneath the cycle's own fallback root instead. Here `z` is a
+        // leaf that the cycle `a<->b` depends on (`a`'s deps are `[b, z]`),
+        // with `z` placed first in slice order so a naive "not yet
+        // represented" check would otherwise seed it standalone before `a`
+        // is reached. `is_in_source_scc` excludes `z`: something (`a`)
+        // depends on it, but it cannot reach `a` back, so only `a` is seeded
+        // and `z` is nested under it, appearing exactly once.
+        let tickets = vec![
+            ticket("z", StatusValue::Open, 2, &[]),
+            ticket("a", StatusValue::Open, 2, &["b", "z"]),
+            ticket("b", StatusValue::Open, 2, &["a"]),
+        ];
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Normal);
+        assert_eq!(root_ids(&forest), vec!["a"]);
+        assert_eq!(child_ids(&forest[0]), vec!["b", "z"]);
+        assert!(
+            forest[0].children[0].children.is_empty(),
+            "back-edge to a must be pruned"
+        );
+        assert!(
+            forest[0].children[1].children.is_empty(),
+            "z has no dependencies of its own"
+        );
     }
 
     #[test]
@@ -1219,10 +1594,11 @@ mod tests {
     }
 
     #[test]
-    fn inverted_shared_dependant_collapses_within_a_root() {
-        // Decision B, c1 (inverted): `e` depends on both `m1` and `m2`, which
-        // both depend on `l`. Within root `l` the per-root visited set is
-        // consumed by m1's branch, so `e` does not reappear under m2.
+    fn inverted_diamond_within_a_root_repeats_the_shared_dependant_under_each_branch() {
+        // Decision B, c1 (inverted) mirror of the Normal diamond test: `e`
+        // depends on both `m1` and `m2`, which both depend on `l`. The
+        // path-local guard lets `e` render once under `m1` and again under
+        // `m2`, since `e` is not "on the path" once `m1`'s branch unwinds.
         let tickets = vec![
             ticket("l", StatusValue::Open, 2, &[]),
             ticket("m1", StatusValue::Open, 2, &["l"]),
@@ -1233,10 +1609,28 @@ mod tests {
         let l = find(&forest, "l");
         assert_eq!(child_ids(l), vec!["m1", "m2"]);
         assert_eq!(child_ids(&l.children[0]), vec!["e"]);
-        assert!(
-            l.children[1].children.is_empty(),
-            "e must not reappear under m2 within root l"
+        assert_eq!(
+            child_ids(&l.children[1]),
+            vec!["e"],
+            "e must repeat under m2 too, not just under m1"
         );
+    }
+
+    #[test]
+    fn inverted_duplicate_dependant_edge_renders_as_a_single_sibling() {
+        // Mirror of duplicate_dependency_entry_renders_as_a_single_sibling
+        // for Inverted: `x` lists the same dependency (`l`) twice
+        // (`deps: [l, l]`), so `build_inverted_adjacency` pushes `x` onto
+        // `l`'s dependant list twice -- the same object appears twice in one
+        // `children_of(l)` call. The path-local guard must still collapse
+        // this to a single sibling under `l`.
+        let tickets = vec![
+            ticket("l", StatusValue::Open, 2, &[]),
+            ticket("x", StatusValue::Open, 2, &["l", "l"]),
+        ];
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Inverted);
+        assert_eq!(root_ids(&forest), vec!["l"]);
+        assert_eq!(child_ids(&forest[0]), vec!["x"]);
     }
 
     #[test]
@@ -1283,6 +1677,99 @@ mod tests {
         ];
         let forest = assemble_ticket_forest(&tickets, TicketSelection::Open, Orientation::Inverted);
         assert_eq!(root_ids(&forest), vec!["o"]);
+    }
+
+    #[test]
+    fn inverted_pure_cycle_with_no_root_renders() {
+        // A <-> B: neither ticket's own dep is unresolvable, so neither is
+        // an Inverted root either. Quirk 1(b) under Inverted: the sink-SCC
+        // fallback still surfaces the whole cycle, seeded once, with the
+        // back-edge pruned.
+        let tickets = vec![
+            ticket("a", StatusValue::Open, 2, &["b"]),
+            ticket("b", StatusValue::Open, 2, &["a"]),
+        ];
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Inverted);
+        assert_eq!(root_ids(&forest), vec!["a"]);
+        assert_eq!(child_ids(&forest[0]), vec!["b"]);
+        assert!(
+            forest[0].children[0].children.is_empty(),
+            "back-edge to a must be pruned"
+        );
+    }
+
+    #[test]
+    fn open_dep_of_closed_dependant_appears_as_fallback_root_inverted() {
+        // Quirk 1(a) under Inverted, matching the ticket's own note: an open
+        // epic (`e`) whose only resolvable dependency is a closed leaf
+        // (`l`). `e` is not an Inverted root (it has a resolvable dep), and
+        // `l` fails Open selection, so `e` would otherwise vanish entirely.
+        // The sink-SCC check is vacuously true once `l` is excluded from the
+        // filtered view (e's only dep no longer resolves), so `e` is seeded
+        // as its own root -- alone, since Inverted's children are `e`'s
+        // dependants and nothing depends on it.
+        let tickets = vec![
+            ticket("e", StatusValue::Open, 2, &["l"]),
+            ticket("l", StatusValue::Closed, 2, &[]),
+        ];
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::Open, Orientation::Inverted);
+        assert_eq!(root_ids(&forest), vec!["e"]);
+        assert!(forest[0].children.is_empty());
+    }
+
+    #[test]
+    fn cycle_with_upstream_dep_seeds_at_cycle_not_standalone_inverted() {
+        // Decision J, c3 independence pair (F,F,T) vs (F,F,F) under Inverted,
+        // the direct-forest mirror of
+        // cycle_with_downstream_dep_seeds_at_cycle_not_standalone_normal (whose
+        // c3 arm is is_in_source_scc): `r` depends on the cycle `a<->b` and is
+        // placed first in slice order. A naive "not yet represented" check
+        // would seed `r` as its own standalone root before `a` is reached, and
+        // `a`'s own inverted walk would then reach `r` again as a dependant.
+        // `is_in_sink_scc` excludes `r` -- it has a resolvable dependency `a`
+        // that can never reach it back -- so only `a` is seeded (F,F,F) and `r`
+        // nests beneath it, appearing exactly once. This also exercises
+        // Decision I's false fold row directly at the forest level, not through
+        // the `--root`-scoped subtree entry point.
+        let tickets = vec![
+            ticket("r", StatusValue::Open, 2, &["a"]),
+            ticket("a", StatusValue::Open, 2, &["b"]),
+            ticket("b", StatusValue::Open, 2, &["a"]),
+        ];
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Inverted);
+        assert_eq!(root_ids(&forest), vec!["a"]);
+        assert_eq!(child_ids(&forest[0]), vec!["r", "b"]);
+        assert!(
+            forest[0].children[0].children.is_empty(),
+            "r has no in-scope dependants of its own"
+        );
+        assert!(
+            forest[0].children[1].children.is_empty(),
+            "back-edge to a must be pruned"
+        );
+    }
+
+    #[test]
+    fn inverted_selection_failing_duplicate_id_dependant_does_not_block_open_copy() {
+        // Decision B, c1-before-c2 ordering: `x` is a leaf depended on by two
+        // *distinct* tickets that both share id "d" -- one closed, one open.
+        // `ChildSource::Dependants` never collapses duplicate ids (unlike
+        // `Deps`'s lookup), so both appear as separate candidates under `x`.
+        // With selection checked before the path guard, the closed copy is
+        // rejected without ever touching the path, so it can never block the
+        // open copy (sharing the same id) from occupying that slot.
+        let tickets = vec![
+            ticket("x", StatusValue::Open, 2, &[]),
+            ticket("d", StatusValue::Closed, 5, &["x"]),
+            ticket("d", StatusValue::Open, 2, &["x"]),
+        ];
+        let forest = assemble_ticket_forest(&tickets, TicketSelection::Open, Orientation::Inverted);
+        assert_eq!(root_ids(&forest), vec!["x"]);
+        assert_eq!(child_ids(&forest[0]), vec!["d"]);
+        assert_eq!(
+            forest[0].children[0].summary, "[P2] d: Title d",
+            "the open copy (P2), not the closed copy (P5), must be the one rendered"
+        );
     }
 
     #[test]
@@ -1499,6 +1986,19 @@ mod tests {
         let scope = [ticket("l", StatusValue::Open, 2, &[])];
         let scope_lookup: HashMap<&str, &Ticket> = scope.iter().map(|t| (t.id(), t)).collect();
         assert!(is_in_sink_scc(&scope[0], &scope_lookup));
+    }
+
+    #[test]
+    fn is_in_source_scc_leaf_with_empty_forward_set_is_vacuously_true() {
+        // Decision K, vacuous all()-fold arm, mirroring
+        // is_in_sink_scc_leaf_with_empty_forward_set_is_vacuously_true: a
+        // ticket nobody depends on has an empty forward-dependants-reachable
+        // set, so the fold is vacuously true and the ticket counts as a
+        // (singleton-leaf) source.
+        let scope = [ticket("r", StatusValue::Open, 2, &[])];
+        let lookup: HashMap<&str, &Ticket> = scope.iter().map(|t| (t.id(), t)).collect();
+        let adjacency = build_inverted_adjacency(&scope);
+        assert!(is_in_source_scc(&scope[0], &adjacency, &lookup));
     }
 
     #[test]
@@ -1726,9 +2226,9 @@ mod tests {
 
     #[test]
     fn graph_root_id_inverted_scoped_cycle_is_not_silently_empty() {
-        // Graph equivalent of the tree regression: root_id: Some + Inverted
-        // recurses into assemble_ticket_graph with root_id: None over the
-        // scope, so the existing fallback-sweep coverage there (see
+        // root_id: Some + Inverted recurses into assemble_ticket_graph with
+        // root_id: None over the scope, so the existing fallback-sweep
+        // coverage there (see
         // graph_pure_cycle_with_no_root_is_still_represented_inverted)
         // already handles a scope whose bottom is a pure cycle -- this locks
         // that the recursive entry point actually reaches it.
@@ -1748,7 +2248,6 @@ mod tests {
 
     #[test]
     fn graph_root_id_inverted_upstream_of_cycle_deduplicates_the_upstream_node() {
-        // Graph equivalent of subtree_root_id_inverted_epic_upstream_of_cycle_is_not_a_standalone_root:
         // "r" depends into cycle a<->b. Unlike the tree path, graph's
         // fallback sweep (in the recursive root_id: None call) has no
         // is_in_sink_scc restriction and could seed "r" as a node before "a"

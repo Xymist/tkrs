@@ -40,15 +40,25 @@ ID matching works for `show`, `start`, `close`, `edit`, etc.
 - `query [FILTER]` -- tickets as NDJSON or pretty JSON
 - `tree` -- print the full ticket tree, fully expanded, as plain text
   (`--status all|open|in-progress|closed`, default `open`); mirrors
-  the `tui` tree pane's ordering and nesting; `--inverted` walks the
-  reversed graph, rooting at leaf work items and nesting dependants;
+  the `tui` tree pane's ordering and nesting; a shared dependency
+  repeats under every root that depends on it *and* under every branch
+  within a single root that reaches it (a diamond shows up twice, not
+  just under the first branch); every selection-matching ticket is
+  guaranteed to appear somewhere -- a pure dependency cycle, or a
+  ticket whose only dependant is filtered out, still renders as its
+  own root rather than vanishing; `--inverted` walks the reversed
+  graph, rooting at leaf work items and nesting dependants (the same
+  completeness guarantee applies here too);
   `-r/--root <id>` restricts output to one ticket's *scope* -- that
   ticket plus its selection-filtered dependency closure (partial IDs
   accepted, `--status` still applied to the root itself). `--inverted`
   combined with `--root` does **not** switch to walking dependants: it
   only re-presents that same fixed scope leaf-first, ascending back to
   the root, so a ticket outside the scope that depends on one of its
-  members is still excluded
+  members is still excluded. Output repeats a ticket once per distinct
+  dependency path reaching it (no truncation), so a densely
+  diamond-shaped graph grows rapidly -- prefer `graph` there, since it
+  dedupes each ticket to a single node
 - `graph` -- print the ticket dependency graph as a Mermaid
   `flowchart TD` to stdout (for sharing plans with nontechnical
   stakeholders); takes the same `--status`, `--inverted`, and
@@ -247,14 +257,22 @@ own issue forms, and the pinning/re-file semantics.
 - **`tk tree` nests dependencies, it doesn't list every ticket at the
   top level**. A ticket that another ticket depends on is only shown
   under its dependant(s) -- if two roots share a dependency, it
-  appears under both, but within a single root's tree each ticket is
-  shown only once (at its first occurrence). Use `tk ls` or `tk query`
-  for a flat view of every ticket regardless of dependency shape.
+  appears under both, and if two branches *within* the same root both
+  reach the same dependency (a diamond), it appears under both
+  branches there too, not just the first one reached. Both `tk tree`
+  and `tk graph` guarantee every selection-matching ticket appears
+  somewhere -- a pure dependency cycle, or a ticket whose only
+  dependant is filtered out (e.g. an open dependency of a closed
+  ticket under the default open view), still renders as its own root
+  rather than silently vanishing. Use `tk ls` or `tk query` for a flat
+  view of every ticket regardless of dependency shape.
   `--inverted` flips the same nesting rule around dependants instead
   of dependencies, so an epic reachable from several leaf tickets
-  repeats once per work path. `tk graph` covers the same data but
-  dedupes each ticket to a single node, so where `tk tree` repeats a
-  shared ticket once per branch, `tk graph` shows it once with every
+  repeats once per work path (the completeness guarantee applies here
+  too: an open epic whose only resolvable dependency is a closed leaf
+  still renders). `tk graph` covers the same data but dedupes each
+  ticket to a single node, so where `tk tree` repeats a shared ticket
+  once per branch or per root, `tk graph` shows it once with every
   incoming edge intact.
 
 ## When to Dispatch the `@tk-handler` Subagent
