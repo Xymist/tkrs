@@ -241,6 +241,9 @@ own issue forms, and the pinning/re-file semantics.
   results to one epic's children.
 - **IDs are partial-matchable**. `tk show 5c4` resolves to
   `nw-5c46` etc. Useful when the user pastes a short prefix.
+- **A duplicate `id:` across two ticket files fails every command
+  fast at load**, naming the id and the offending file paths -- fix
+  the hand-edited `id:` field so each ticket is unique.
 - **`.tickets/` is usually gitignored**. Where it is, ticket IDs are
   not meaningful outside the checkout -- don't reference them in
   commit messages, PR descriptions, branch names, or GitHub comments;

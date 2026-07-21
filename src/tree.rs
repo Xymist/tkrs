@@ -232,7 +232,9 @@ fn collect_node_ids(nodes: &[TicketNode], ids: &mut HashSet<String>) {
 /// Reachability is resolved through `scope_lookup`, which keeps one ticket
 /// per id (last wins); for duplicate-id tickets with differing dep lists,
 /// eligibility is computed against that single instance rather than the
-/// union the rendering walk fans out over.
+/// union the rendering walk fans out over. The ticket store itself rejects a
+/// duplicate id at load time, so this caveat applies only to a caller
+/// passing an arbitrary, hand-built slice directly.
 fn is_in_sink_scc(ticket: &Ticket, scope_lookup: &HashMap<&str, &Ticket>) -> bool {
     let forward = reachable_via_deps(ticket, scope_lookup);
     forward.iter().all(|id| {
@@ -283,7 +285,9 @@ fn reachable_via_deps<'a>(
 ///
 /// As with [`is_in_sink_scc`], a ticket with no resolvable in-scope
 /// dependant at all is vacuously eligible, and duplicate-id tickets are
-/// resolved against whichever single instance `lookup` keeps (last wins).
+/// resolved against whichever single instance `lookup` keeps (last wins) --
+/// again a caveat for a caller passing an arbitrary slice directly, since
+/// the ticket store itself rejects a duplicate id at load time.
 fn is_in_source_scc<'a>(
     ticket: &'a Ticket,
     adjacency: &HashMap<&str, Vec<&'a Ticket>>,

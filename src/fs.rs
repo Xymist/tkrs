@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
 };
@@ -51,7 +52,62 @@ pub fn read_all_tickets() -> color_eyre::Result<Vec<Ticket>> {
         }
     }
 
+    reject_duplicate_ids(&tickets)?;
+
     Ok(tickets)
+}
+
+/// Every ticket id must be claimed by exactly one file: assembly (`src/tree.rs`
+/// and the TUI) is deliberately tolerant of duplicate-id slices so it stays
+/// usable as a library over arbitrary input, but a duplicate id in the store
+/// itself is always a hand-editing mistake that makes `tree`/`graph`/`ls`
+/// views diverge depending on which copy a given code path happens to
+/// resolve to. Rejecting it here, once, at load time, means every command
+/// fails fast with one clear error instead of silently producing a
+/// different, wrong view per command.
+fn reject_duplicate_ids(tickets: &[Ticket]) -> color_eyre::Result<()> {
+    let mut paths_by_id: HashMap<&str, Vec<&Path>> = HashMap::new();
+    for ticket in tickets {
+        paths_by_id
+            .entry(ticket.id())
+            .or_default()
+            .push(ticket.path.as_path());
+    }
+
+    let mut duplicates: Vec<(&str, Vec<&Path>)> = paths_by_id
+        .into_iter()
+        .filter(|(_, paths)| paths.len() > 1)
+        .collect();
+    if duplicates.is_empty() {
+        return Ok(());
+    }
+    duplicates.sort_by_key(|(id, _)| *id);
+
+    let mut message = String::new();
+    for (id, mut paths) in duplicates {
+        paths.sort();
+        if !message.is_empty() {
+            message.push('\n');
+        }
+        message.push_str(&format!(
+            "duplicate ticket id '{id}' in {}; fix the id: field so each is unique",
+            join_with_and(&paths)
+        ));
+    }
+
+    Err(eyre!(message))
+}
+
+/// Joins `paths` for an error message: `"a"` for one, `"a and b"` for two,
+/// `"a, b, and c"` for three or more.
+fn join_with_and(paths: &[&Path]) -> String {
+    let rendered: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+    match rendered.as_slice() {
+        [] => String::new(),
+        [only] => only.clone(),
+        [first, second] => format!("{first} and {second}"),
+        [init @ .., last] => format!("{}, and {last}", init.join(", ")),
+    }
 }
 
 fn section_value(raw: &str) -> Option<String> {
@@ -228,4 +284,85 @@ pub fn tickets_path() -> PathBuf {
     }
 
     PathBuf::from(".tickets")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{TicketFrontmatter, cli::StatusValue};
+
+    fn ticket_at(id: &str, path: &str) -> Ticket {
+        Ticket {
+            title: format!("Title {id}"),
+            frontmatter: TicketFrontmatter {
+                id: id.to_string(),
+                r#type: None,
+                status: StatusValue::Open,
+                deps: Vec::new(),
+                links: Vec::new(),
+                priority: 2,
+                assignee: None,
+                tags: Vec::new(),
+                created: None,
+                closed_at: None,
+                external_ref: None,
+            },
+            body: TicketBody {
+                description: None,
+                implementation_plan: None,
+                acceptance: None,
+                notes: Vec::new(),
+            },
+            path: PathBuf::from(path),
+        }
+    }
+
+    #[test]
+    fn reject_duplicate_ids_allows_a_store_with_unique_ids() {
+        let tickets = vec![ticket_at("a", "a.md"), ticket_at("b", "b.md")];
+        assert!(reject_duplicate_ids(&tickets).is_ok());
+    }
+
+    #[test]
+    fn reject_duplicate_ids_names_the_id_and_both_paths() {
+        let tickets = vec![
+            ticket_at("x-1234", ".tickets/a.md"),
+            ticket_at("x-1234", ".tickets/b.md"),
+        ];
+        let err = reject_duplicate_ids(&tickets).unwrap_err().to_string();
+        assert!(err.contains("x-1234"));
+        assert!(err.contains(".tickets/a.md"));
+        assert!(err.contains(".tickets/b.md"));
+    }
+
+    #[test]
+    fn reject_duplicate_ids_joins_three_paths_with_commas_and_and() {
+        let tickets = vec![
+            ticket_at("x-1234", ".tickets/b.md"),
+            ticket_at("x-1234", ".tickets/a.md"),
+            ticket_at("x-1234", ".tickets/c.md"),
+        ];
+        let err = reject_duplicate_ids(&tickets).unwrap_err().to_string();
+        assert!(
+            err.contains(".tickets/a.md, .tickets/b.md, and .tickets/c.md"),
+            "three paths must be sorted and comma-joined with a final 'and': {err}"
+        );
+    }
+
+    #[test]
+    fn reject_duplicate_ids_lists_every_duplicated_id_in_one_error() {
+        let tickets = vec![
+            ticket_at("x-1111", "a.md"),
+            ticket_at("x-1111", "b.md"),
+            ticket_at("y-2222", "c.md"),
+            ticket_at("y-2222", "d.md"),
+        ];
+        let err = reject_duplicate_ids(&tickets).unwrap_err().to_string();
+        assert!(err.contains("x-1111"));
+        assert!(err.contains("y-2222"));
+        assert!(err.contains("a.md"));
+        assert!(err.contains("b.md"));
+        assert!(err.contains("c.md"));
+        assert!(err.contains("d.md"));
+    }
 }

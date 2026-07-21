@@ -29,6 +29,26 @@ fn write_ticket(dir: &TempDir, id: &str, links: &[&str]) {
     writeln!(file, "# {id}").unwrap();
 }
 
+/// Writes a raw ticket file whose file name is independent of its
+/// frontmatter `id:` value, so two distinct files can be made to claim the
+/// same id.
+fn write_ticket_at(dir: &TempDir, file_name: &str, id: &str) {
+    let tickets_dir = dir.path().join(".tickets");
+    fs::create_dir_all(&tickets_dir).unwrap();
+    let path = tickets_dir.join(file_name);
+    let mut file = fs::File::create(&path).unwrap();
+    writeln!(file, "---").unwrap();
+    writeln!(file, "id: {id}").unwrap();
+    writeln!(file, "status: open").unwrap();
+    writeln!(file, "deps: []").unwrap();
+    writeln!(file, "links: []").unwrap();
+    writeln!(file, "created: 2026-01-01T00:00:00Z").unwrap();
+    writeln!(file, "type: task").unwrap();
+    writeln!(file, "priority: 2").unwrap();
+    writeln!(file, "---").unwrap();
+    writeln!(file, "# {id}").unwrap();
+}
+
 #[allow(clippy::too_many_arguments)]
 fn write_ticket_with_fields(
     dir: &TempDir,
@@ -3633,4 +3653,37 @@ fn tree_inverted_multi_level_glyphs_match_normal() {
         .assert()
         .success()
         .stdout(predicate::eq(inverted_expected.as_str()));
+}
+
+#[test]
+fn duplicate_ticket_id_is_rejected_at_load_for_tree_ls_and_graph() {
+    let temp = TempDir::new().unwrap();
+    write_ticket_at(&temp, "a.md", "x-1234");
+    write_ticket_at(&temp, "b.md", "x-1234");
+
+    for subcommand in ["tree", "ls", "graph"] {
+        tk_cmd(&temp).arg(subcommand).assert().failure().stderr(
+            predicate::str::contains("duplicate ticket id 'x-1234'")
+                .and(predicate::str::contains("a.md"))
+                .and(predicate::str::contains("b.md")),
+        );
+    }
+}
+
+#[test]
+fn multiple_duplicated_ticket_ids_are_all_listed_in_one_error() {
+    let temp = TempDir::new().unwrap();
+    write_ticket_at(&temp, "a.md", "x-1111");
+    write_ticket_at(&temp, "b.md", "x-1111");
+    write_ticket_at(&temp, "c.md", "y-2222");
+    write_ticket_at(&temp, "d.md", "y-2222");
+
+    tk_cmd(&temp).arg("ls").assert().failure().stderr(
+        predicate::str::contains("duplicate ticket id 'x-1111'")
+            .and(predicate::str::contains("duplicate ticket id 'y-2222'"))
+            .and(predicate::str::contains("a.md"))
+            .and(predicate::str::contains("b.md"))
+            .and(predicate::str::contains("c.md"))
+            .and(predicate::str::contains("d.md")),
+    );
 }

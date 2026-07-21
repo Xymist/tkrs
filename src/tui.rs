@@ -1,5 +1,6 @@
 use std::io;
 
+use color_eyre::eyre::eyre;
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -178,27 +179,27 @@ impl<'a> TuiApp<'a> {
     fn exit(&mut self) {
         self.exit = true;
     }
-}
 
-impl<'a> Widget for &mut TuiApp<'a> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let [ticket_window, content_window] =
-            Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
-        self.tree_area = ticket_window;
-        self.content_area = content_window;
+    /// Renders the ticket tree pane into `area`, or returns an error instead
+    /// of panicking or rendering a blank pane. `assemble_ticket_tree` can
+    /// fail if a `TicketNode` carries an empty summary (never produced by
+    /// [`assemble_ticket_forest`] today), and `Tree::new` rejects duplicate
+    /// top-level identifiers -- unreachable from disk data once the ticket
+    /// store itself rejects a duplicate id at load time, but this boundary
+    /// stays defensive rather than trusting that invariant from afar.
+    fn render_ticket_tree(
+        &mut self,
+        area: Rect,
+        buf: &mut Buffer,
+        border_style: Style,
+    ) -> color_eyre::Result<()> {
         let items: Vec<TreeItem<String>> =
-            assemble_ticket_tree(self.tickets, self.ticket_selection).unwrap_or_default();
-        let (ticket_border, content_border) = if self.focus == Focus::Tickets {
-            (Style::default().fg(Color::Blue), Style::default())
-        } else {
-            (Style::default(), Style::default().fg(Color::Blue))
-        };
-
+            assemble_ticket_tree(self.tickets, self.ticket_selection)?;
         let tree_widget = Tree::new(&items)
-            .expect("all item identifiers are unique")
+            .map_err(|e| eyre!("ticket tree contains duplicate identifiers: {e}"))?
             .block(
                 Block::bordered()
-                    .border_style(ticket_border)
+                    .border_style(border_style)
                     .title(format!(
                         "{} Tickets [↑/↓ or click to select, →/← expand/collapse, Tab/click to switch focus, scroll wheel, S to filter]",
                         match self.ticket_selection {
@@ -215,12 +216,26 @@ impl<'a> Widget for &mut TuiApp<'a> {
                     .begin_symbol(Some("↑"))
                     .end_symbol(Some("↓")),
             ));
-        <Tree<String> as StatefulWidget>::render(
-            tree_widget,
-            ticket_window,
-            buf,
-            &mut self.tree_state,
-        );
+        <Tree<String> as StatefulWidget>::render(tree_widget, area, buf, &mut self.tree_state);
+        Ok(())
+    }
+}
+
+impl<'a> Widget for &mut TuiApp<'a> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let [ticket_window, content_window] =
+            Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
+        self.tree_area = ticket_window;
+        self.content_area = content_window;
+        let (ticket_border, content_border) = if self.focus == Focus::Tickets {
+            (Style::default().fg(Color::Blue), Style::default())
+        } else {
+            (Style::default(), Style::default().fg(Color::Blue))
+        };
+
+        if let Err(err) = self.render_ticket_tree(ticket_window, buf, ticket_border) {
+            render_ticket_tree_error(ticket_window, buf, ticket_border, &err.to_string());
+        }
 
         let selected_ticket = self
             .tickets
@@ -327,11 +342,30 @@ fn node_to_tree_item(node: &TicketNode) -> color_eyre::Result<TreeItem<'static, 
     Ok(item)
 }
 
+/// Renders `message` as visible text in the ticket tree pane, in place of
+/// the tree itself, so a boundary failure (see
+/// [`TuiApp::render_ticket_tree`]) is legible to the user instead of
+/// panicking or leaving the pane blank.
+fn render_ticket_tree_error(area: Rect, buf: &mut Buffer, border_style: Style, message: &str) {
+    Paragraph::new(message.to_string())
+        .block(
+            Block::bordered()
+                .border_style(border_style)
+                .title("Tickets [error]"),
+        )
+        .wrap(Wrap { trim: false })
+        .render(area, buf);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Focus, TuiApp};
+    use crate::{Ticket, TicketBody, TicketFrontmatter, cli::StatusValue};
+    use ratatui::buffer::Buffer;
     use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
+    use ratatui::style::Style;
+    use std::path::PathBuf;
 
     // Build an app with a known layout: the left half (cols 0..40) is the
     // ticket tree, the right half (cols 40..80) is the content pane. These are
@@ -342,6 +376,32 @@ mod tests {
         app.tree_area = Rect::new(0, 0, 40, 24);
         app.content_area = Rect::new(40, 0, 40, 24);
         app
+    }
+
+    fn ticket_with_id(id: &str) -> Ticket {
+        Ticket {
+            title: format!("Title {id}"),
+            frontmatter: TicketFrontmatter {
+                id: id.to_string(),
+                r#type: None,
+                status: StatusValue::Open,
+                deps: Vec::new(),
+                links: Vec::new(),
+                priority: 2,
+                assignee: None,
+                tags: Vec::new(),
+                created: None,
+                closed_at: None,
+                external_ref: None,
+            },
+            body: TicketBody {
+                description: None,
+                implementation_plan: None,
+                acceptance: None,
+                notes: Vec::new(),
+            },
+            path: PathBuf::from(format!("{id}.md")),
+        }
     }
 
     fn mouse_at(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
@@ -419,5 +479,59 @@ mod tests {
         assert_eq!(app.focus, Focus::Tickets);
         app.handle_mouse_event(mouse_at(MouseEventKind::Down(MouseButton::Right), 50, 5));
         assert_eq!(app.focus, Focus::Tickets);
+    }
+
+    #[test]
+    fn render_ticket_tree_reports_duplicate_top_level_ids_instead_of_panicking() {
+        // Load-time rejection makes this unreachable from disk data, but the
+        // boundary stays defensive: two root-eligible tickets sharing an id
+        // (both independent, so `assemble_ticket_forest` -- which is
+        // deliberately duplicate-id-tolerant, per its own documented
+        // semantics -- returns two top-level nodes with the same id) must
+        // make `render_ticket_tree` return an `Err` rather than panic
+        // inside `Tree::new` or blank the pane.
+        let tickets = vec![ticket_with_id("a"), ticket_with_id("a")];
+        let mut app = TuiApp::new(&tickets);
+        let area = Rect::new(0, 0, 40, 24);
+        let mut buf = Buffer::empty(area);
+        assert!(
+            app.render_ticket_tree(area, &mut buf, Style::default())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn render_ticket_tree_succeeds_for_an_ordinary_store() {
+        let tickets = vec![ticket_with_id("a"), ticket_with_id("b")];
+        let mut app = TuiApp::new(&tickets);
+        let area = Rect::new(0, 0, 40, 24);
+        let mut buf = Buffer::empty(area);
+        assert!(
+            app.render_ticket_tree(area, &mut buf, Style::default())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn full_render_paints_a_visible_error_for_duplicate_ids() {
+        // The Widget::render fallback must paint the boundary failure into
+        // the pane -- the "Tickets [error]" title and the error text itself
+        // must be legible in the buffer, not a blank region.
+        use ratatui::prelude::Widget;
+
+        let tickets = vec![ticket_with_id("a"), ticket_with_id("a")];
+        let mut app = TuiApp::new(&tickets);
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        Widget::render(&mut app, area, &mut buf);
+        let painted: String = buf.content().iter().map(|cell| cell.symbol()).collect();
+        assert!(
+            painted.contains("Tickets [error]"),
+            "error title must be painted: {painted}"
+        );
+        assert!(
+            painted.contains("identifier"),
+            "the duplicate-identifier error text must be painted: {painted}"
+        );
     }
 }

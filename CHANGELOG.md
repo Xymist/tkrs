@@ -1,5 +1,22 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Loading the ticket store now rejects a duplicate frontmatter `id:`
+  claimed by more than one file with a hard error naming the id and
+  every offending file path (all duplicated ids are listed together
+  in one error), instead of letting `tree`/`ls`/`graph`/`tui` each
+  silently resolve the ambiguity differently and produce divergent
+  views. `src/tree.rs`'s forest and graph assembly remain tolerant of
+  duplicate ids passed directly to their public functions (their
+  documented duplicate-id semantics are unchanged) -- rejection now
+  happens once, at load, before any command sees the data. The TUI's
+  tree pane is additionally hardened at this boundary: a duplicate
+  identifier (now unreachable from disk data) renders as a visible
+  error message in the pane instead of panicking or leaving it blank.
+
 ## [0.11.0] - 2026-07-21
 
 ### Fixed
