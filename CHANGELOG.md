@@ -16,6 +16,23 @@
   tree pane is additionally hardened at this boundary: a duplicate
   identifier (now unreachable from disk data) renders as a visible
   error message in the pane instead of panicking or leaving it blank.
+  Loading also now rejects an empty or whitespace-only `id:`, naming
+  the offending file(s); the empty string is reserved for the
+  truncation marker's own synthetic node, so a real ticket can never
+  collide with it.
+
+### Added
+
+- `tk tree` (and `tk tui`'s tree pane) now caps assembly at 10000
+  rendered nodes per call. Path-local repeats mean output grows with
+  the number of distinct dependency paths rather than with the ticket
+  count, so a densely layered diamond graph could otherwise grow
+  without bound; once the cap is hit, a `[!] output truncated at
+  10000 nodes ...` marker is appended as the last top-level entry and
+  nothing further is rendered. `tk tree --unbounded` lifts the cap;
+  `tk graph` ignores the flag (it dedupes each ticket to a single node
+  already and needs no cap). Realistic, shallow/sparse stores are
+  unaffected.
 
 ### Changed
 

@@ -45,6 +45,79 @@ pub enum Orientation {
     Inverted,
 }
 
+/// Default cap on the number of [`TicketNode`]s a single bounded assembly
+/// call creates. Path-local repeats mean rendered node count grows with the
+/// number of distinct dependency paths through the graph rather than with
+/// the ticket count, so a densely layered diamond graph can otherwise grow
+/// without bound; see [`assemble_ticket_forest_bounded`].
+pub const DEFAULT_NODE_BUDGET: usize = 10_000;
+
+/// Tracks how many more [`TicketNode`]s a bounded assembly call may still
+/// create, and whether the cap has actually cut something off. `None`
+/// (unbounded) always permits another node; `Some(0)` denies one and
+/// records that the walk was cut short -- distinct from a walk that simply
+/// finishes with no more candidates left to try, which never denies a
+/// request and so never gets marked truncated.
+struct NodeBudget {
+    remaining: Option<usize>,
+    truncated: bool,
+}
+
+impl NodeBudget {
+    fn new(limit: Option<usize>) -> Self {
+        Self {
+            remaining: limit,
+            truncated: false,
+        }
+    }
+
+    /// Reserves budget for one more node. Returns `true` (and, if bounded,
+    /// decrements the remaining count) when a node may be created; returns
+    /// `false` and marks the budget truncated when none remains. Callers
+    /// must only call this once a candidate has already passed every other
+    /// filter, so budget is spent solely on nodes that are actually created.
+    fn take(&mut self) -> bool {
+        match &mut self.remaining {
+            None => true,
+            Some(0) => {
+                self.truncated = true;
+                false
+            }
+            Some(remaining) => {
+                *remaining -= 1;
+                true
+            }
+        }
+    }
+
+    fn is_truncated(&self) -> bool {
+        self.truncated
+    }
+}
+
+/// The synthetic node appended as the last top-level root when a bounded
+/// assembly's node budget is exhausted mid-walk. Its id is the empty
+/// string, which no real ticket id ever is, so it cannot collide with (and
+/// stays unique among) the other top-level roots it sits beside.
+///
+/// # Panics
+///
+/// Panics if `node_budget` is `None`. Callers only invoke this once
+/// [`NodeBudget::is_truncated`] is true, which is only possible when the
+/// budget was bounded (the `None`, unbounded arm of [`NodeBudget::take`]
+/// never sets `truncated`).
+fn truncation_marker_node(node_budget: Option<usize>) -> TicketNode {
+    let limit = node_budget.expect("a truncated budget is always bounded");
+    TicketNode {
+        id: String::new(),
+        summary: format!(
+            "[!] output truncated at {limit} nodes (dense dependency graph; \
+             rerun with --unbounded or use tk graph)"
+        ),
+        children: Vec::new(),
+    }
+}
+
 /// Builds the forest of ticket trees for the given `orientation`. Regular
 /// root eligibility and the parent/child edge direction are both taken from
 /// the unfiltered dependency graph before `selection` is applied:
@@ -94,6 +167,29 @@ pub fn assemble_ticket_forest(
     selection: TicketSelection,
     orientation: Orientation,
 ) -> Vec<TicketNode> {
+    assemble_ticket_forest_bounded(tickets, selection, orientation, Some(DEFAULT_NODE_BUDGET))
+}
+
+/// As [`assemble_ticket_forest`], but the total number of [`TicketNode`]s
+/// created (every root, every child, every fallback root) is capped at
+/// `node_budget` when `Some`, or unbounded when `None`. Once the cap is
+/// reached, no further node is created anywhere in the walk -- the
+/// remainder of the current branch, any later sibling or root, and the
+/// fallback sweep all stop producing new nodes from that point on, in the
+/// same deterministic walk order `assemble_ticket_forest` always uses, so
+/// the same store truncates at the same point every time. A single
+/// synthetic marker node (see [`truncation_marker_node`]) is appended as the
+/// last top-level root exactly when the cap actually cut something off --
+/// not merely when the walk happens to produce precisely `node_budget`
+/// nodes with nothing left to add.
+pub fn assemble_ticket_forest_bounded(
+    tickets: &[Ticket],
+    selection: TicketSelection,
+    orientation: Orientation,
+    node_budget: Option<usize>,
+) -> Vec<TicketNode> {
+    let mut budget = NodeBudget::new(node_budget);
+
     let lookup: HashMap<&str, &Ticket> = tickets.iter().map(|t| (t.id(), t)).collect();
     let adjacency = build_inverted_adjacency(tickets);
     let source = match orientation {
@@ -101,11 +197,13 @@ pub fn assemble_ticket_forest(
         Orientation::Inverted => ChildSource::Dependants(&adjacency),
     };
 
-    let mut forest: Vec<TicketNode> =
-        eligible_roots(tickets, selection, orientation, None, &lookup)
-            .into_iter()
-            .map(|ticket| build_root_node(ticket, &source, selection))
-            .collect();
+    let mut forest: Vec<TicketNode> = Vec::new();
+    for ticket in eligible_roots(tickets, selection, orientation, None, &lookup) {
+        if !budget.take() {
+            break;
+        }
+        forest.push(build_root_node(ticket, &source, selection, &mut budget));
+    }
 
     let mut represented = HashSet::new();
     collect_node_ids(&forest, &mut represented);
@@ -114,7 +212,13 @@ pub fn assemble_ticket_forest(
     // ticket that fails `selection` contributes no edges to this analysis
     // (mirroring how `children_recursively` already prunes past a filtered
     // ticket), so a closed gatekeeper never masks a dependency that becomes
-    // structurally free once the gatekeeper itself is excluded.
+    // structurally free once the gatekeeper itself is excluded. This sweep
+    // always runs, even once `budget` is already exhausted: it stays O(V+E)
+    // in the ticket count regardless (see `compute_scc_eligibility`), and
+    // running it is the only way to tell whether it would have added
+    // anything -- skipping it outright could either wrongly show the
+    // truncation marker when nothing was actually cut off, or wrongly hide
+    // it when a cycle's fallback root was.
     let filtered_lookup: HashMap<&str, &Ticket> = tickets
         .iter()
         .filter(|t| matches_selection(t, selection))
@@ -135,9 +239,16 @@ pub fn assemble_ticket_forest(
         if !eligible {
             continue;
         }
-        let node = build_root_node(ticket, &source, selection);
+        if !budget.take() {
+            break;
+        }
+        let node = build_root_node(ticket, &source, selection, &mut budget);
         collect_node_ids(std::slice::from_ref(&node), &mut represented);
         forest.push(node);
+    }
+
+    if budget.is_truncated() {
+        forest.push(truncation_marker_node(node_budget));
     }
 
     forest
@@ -155,57 +266,144 @@ pub fn assemble_ticket_forest(
 ///   the filter yields an empty forest, and the closure itself stops at any
 ///   ticket that fails `selection` (its own dependencies never enter the
 ///   scope).
-/// - `Inverted`: first computes the scope via the `Normal` walk above, then
-///   re-runs the unrestricted [`assemble_ticket_forest`] in `Inverted`
+/// - `Inverted`: first computes the scope's id set via [`closure_ids`] (the
+///   same membership [`Normal`] would walk, but a direct O(V+E) traversal
+///   that never materializes a [`TicketNode`]), then re-runs the
+///   unrestricted [`assemble_ticket_forest_bounded`] in `Inverted`
 ///   orientation over the scope alone. The scope's own leaves become roots
 ///   and nesting grows toward `root_id`, so a ticket outside the scope that
 ///   happens to depend on a scope member is never pulled in.
-///   [`assemble_ticket_forest`] carries its own completeness guarantee (see
-///   its doc comment), so a scope whose bottom is a dependency cycle is
-///   still never silently dropped here, with no extra handling needed in
-///   this function.
+///   [`assemble_ticket_forest_bounded`] carries its own completeness
+///   guarantee (see its doc comment), so a scope whose bottom is a
+///   dependency cycle is still never silently dropped here, with no extra
+///   handling needed in this function.
 pub fn assemble_ticket_subtree(
     tickets: &[Ticket],
     selection: TicketSelection,
     orientation: Orientation,
     root_id: &str,
 ) -> Vec<TicketNode> {
+    assemble_ticket_subtree_bounded(
+        tickets,
+        selection,
+        orientation,
+        root_id,
+        Some(DEFAULT_NODE_BUDGET),
+    )
+}
+
+/// As [`assemble_ticket_subtree`], with the same `node_budget` semantics as
+/// [`assemble_ticket_forest_bounded`] applied to the final rendered subtree.
+/// The `Inverted` branch's own scope computation ([`closure_ids`], determining
+/// membership, not user-visible output) is a linear id-set walk that never
+/// materializes a [`TicketNode`], so it is unaffected by `node_budget` and
+/// cannot itself blow up on a dense diamond graph -- only the subtree
+/// ultimately rendered over that scope is capped.
+pub fn assemble_ticket_subtree_bounded(
+    tickets: &[Ticket],
+    selection: TicketSelection,
+    orientation: Orientation,
+    root_id: &str,
+    node_budget: Option<usize>,
+) -> Vec<TicketNode> {
     if orientation == Orientation::Inverted {
-        let closure = assemble_ticket_subtree(tickets, selection, Orientation::Normal, root_id);
-        let scope = scoped_tickets(tickets, &closure);
-        // This delegates its fallback sweep to `assemble_ticket_forest`
+        let ids = closure_ids(tickets, selection, root_id);
+        let scope = scoped_tickets(tickets, &ids);
+        // This delegates its fallback sweep to `assemble_ticket_forest_bounded`
         // (see its doc comment for the sink-SCC-eligible sweep it carries),
         // so a scope whose bottom is a dependency cycle is guaranteed
-        // complete: every scope member ends up represented, in slice order.
-        return assemble_ticket_forest(&scope, selection, Orientation::Inverted);
+        // complete: every scope member ends up represented, in slice order,
+        // up to `node_budget`.
+        return assemble_ticket_forest_bounded(
+            &scope,
+            selection,
+            Orientation::Inverted,
+            node_budget,
+        );
     }
 
+    let mut budget = NodeBudget::new(node_budget);
     let lookup: HashMap<&str, &Ticket> = tickets.iter().map(|t| (t.id(), t)).collect();
     let source = ChildSource::Deps(&lookup);
 
-    eligible_roots(tickets, selection, orientation, Some(root_id), &lookup)
-        .into_iter()
-        .map(|ticket| build_root_node(ticket, &source, selection))
-        .collect()
+    let mut forest = Vec::new();
+    for ticket in eligible_roots(tickets, selection, orientation, Some(root_id), &lookup) {
+        if !budget.take() {
+            break;
+        }
+        forest.push(build_root_node(ticket, &source, selection, &mut budget));
+    }
+
+    if budget.is_truncated() {
+        forest.push(truncation_marker_node(node_budget));
+    }
+
+    forest
 }
 
 /// The ticket subset for a `--root root_id` scope: every ticket from
-/// `tickets` whose id appears anywhere in `closure` (the `Normal`-orientation
-/// subtree already assembled for that root), preserving `tickets`' original
-/// slice order rather than walk-discovery order. Membership is by id, so a
-/// duplicate-id ticket enters the scope whenever any ticket sharing its id is
-/// reached by the normal walk -- the same duplicate-id handling used
-/// everywhere else in this module, just applied to a whole-slice filter
-/// instead of a single walk.
-fn scoped_tickets(tickets: &[Ticket], closure: &[TicketNode]) -> Vec<Ticket> {
-    let mut closure_ids = HashSet::new();
-    collect_node_ids(closure, &mut closure_ids);
-
+/// `tickets` whose id appears in `ids` (as computed by [`closure_ids`]),
+/// preserving `tickets`' original slice order rather than walk-discovery
+/// order. Membership is by id, so a duplicate-id ticket enters the scope
+/// whenever any ticket sharing its id is in `ids` -- the same duplicate-id
+/// handling used everywhere else in this module, just applied to a
+/// whole-slice filter instead of a single walk.
+fn scoped_tickets(tickets: &[Ticket], ids: &HashSet<&str>) -> Vec<Ticket> {
     tickets
         .iter()
-        .filter(|t| closure_ids.contains(t.id()))
+        .filter(|t| ids.contains(t.id()))
         .cloned()
         .collect()
+}
+
+/// The set of ticket ids in `root_id`'s `Normal`-orientation,
+/// selection-filtered dependency closure -- exactly the id set the `Normal`
+/// walk in [`assemble_ticket_subtree`] would visit, computed directly by an
+/// O(V+E) visited-set traversal that never materializes a [`TicketNode`].
+/// Used to determine `--root`'s scope for the `Inverted` presentation
+/// without the exponential blowup a repeating render would produce on a
+/// densely diamond-shaped dependency graph.
+///
+/// Every ticket whose id equals `root_id` and which passes `selection` seeds
+/// its own walk -- mirroring [`assemble_ticket_subtree`]'s duplicate-id
+/// handling, each duplicate keeps its own `deps()` -- so a later duplicate is
+/// pushed unconditionally even if an earlier one already claimed the id in
+/// `visited`; only a root that fails `selection` (and so seeds nothing)
+/// yields an empty closure. From there, resolvable `deps()` edges are
+/// followed iteratively, applying `selection` at every step and stopping at
+/// any ticket that fails it -- exactly like the walk's own per-level
+/// selection guard -- with `visited` terminating a genuine cycle.
+fn closure_ids<'a>(
+    tickets: &'a [Ticket],
+    selection: TicketSelection,
+    root_id: &str,
+) -> HashSet<&'a str> {
+    let lookup: HashMap<&str, &Ticket> = tickets.iter().map(|t| (t.id(), t)).collect();
+    let mut visited: HashSet<&'a str> = HashSet::new();
+    let mut stack: Vec<&'a Ticket> = Vec::new();
+
+    for ticket in tickets {
+        if ticket.id() == root_id && matches_selection(ticket, selection) {
+            visited.insert(ticket.id());
+            stack.push(ticket);
+        }
+    }
+
+    while let Some(current) = stack.pop() {
+        for dep_id in current.deps() {
+            let Some(&dep_ticket) = lookup.get(dep_id.as_str()) else {
+                continue;
+            };
+            if !matches_selection(dep_ticket, selection) {
+                continue;
+            }
+            if visited.insert(dep_ticket.id()) {
+                stack.push(dep_ticket);
+            }
+        }
+    }
+
+    visited
 }
 
 /// Collects the id of every node in `nodes` and all of their descendants,
@@ -411,18 +609,22 @@ fn eligible_roots<'a>(
 }
 
 /// Builds a fully expanded node for a single root ticket, seeding the
-/// path-local ancestor guard with the root itself.
+/// path-local ancestor guard with the root itself. The root's own node is
+/// not charged against `budget` here -- callers must already have reserved
+/// budget for it (see [`NodeBudget::take`]) before calling this function;
+/// only its children are budgeted within.
 fn build_root_node(
     ticket: &Ticket,
     source: &ChildSource,
     selection: TicketSelection,
+    budget: &mut NodeBudget,
 ) -> TicketNode {
     let mut path = HashSet::new();
     path.insert(ticket.id().to_string());
     TicketNode {
         id: ticket.id().to_string(),
         summary: ticket.summary(),
-        children: children_recursively(ticket, source, &mut path, selection),
+        children: children_recursively(ticket, source, &mut path, selection, budget),
     }
 }
 
@@ -509,11 +711,21 @@ fn is_root(
 /// happens to share its id (e.g. a duplicate-id store where a closed and an
 /// open ticket of the same id are both dependants of the same dependency)
 /// from being rendered when its turn comes.
+///
+/// `budget` is checked last, only once a candidate has already passed every
+/// other filter, so it is spent solely on nodes that are actually created --
+/// never on one a selection, `seen`, or `path` rejection would have pruned
+/// anyway. Once `budget` denies a candidate, the whole remaining sibling
+/// list is abandoned (not just that one candidate): the walk is
+/// deterministic, so nothing later in this list, or in any later branch
+/// reached after this call returns, will be permitted to create a node
+/// either.
 fn children_recursively<'a>(
     ticket: &'a Ticket,
     source: &ChildSource<'a>,
     path: &mut HashSet<String>,
     selection: TicketSelection,
+    budget: &mut NodeBudget,
 ) -> Vec<TicketNode> {
     let mut children = Vec::new();
     let mut seen = HashSet::new();
@@ -536,10 +748,18 @@ fn children_recursively<'a>(
             continue;
         }
 
+        if !budget.take() {
+            // Roll back the path reservation: this candidate never became a
+            // node, so it must not occupy an ancestor-path slot that could
+            // wrongly block a different branch reaching the same ticket.
+            path.remove(child.id());
+            break;
+        }
+
         children.push(TicketNode {
             id: child.id().to_string(),
             summary: child.summary(),
-            children: children_recursively(child, source, path, selection),
+            children: children_recursively(child, source, path, selection, budget),
         });
 
         path.remove(child.id());
@@ -616,11 +836,12 @@ pub struct TicketGraph {
 /// `root_id: Some` and `Orientation::Inverted` combine the same way
 /// [`assemble_ticket_subtree`] does: `--root` fixes the *scope* (`root_id`
 /// plus its selection-filtered dependency closure, per the `Normal`
-/// orientation), and `Inverted` only changes how that scope is presented --
-/// the unrestricted graph assembly (fallback sweep included, so a cycle
-/// inside the scope stays safe) runs over the scope alone, leaf-first, up to
-/// `root_id`. A ticket outside the scope that depends on a scope member is
-/// never pulled in.
+/// orientation, computed via the linear [`closure_ids`] rather than by
+/// materializing a `Normal` subtree), and `Inverted` only changes how that
+/// scope is presented -- the unrestricted graph assembly (fallback sweep
+/// included, so a cycle inside the scope stays safe) runs over the scope
+/// alone, leaf-first, up to `root_id`. A ticket outside the scope that
+/// depends on a scope member is never pulled in.
 pub fn assemble_ticket_graph(
     tickets: &[Ticket],
     selection: TicketSelection,
@@ -630,8 +851,8 @@ pub fn assemble_ticket_graph(
     if orientation == Orientation::Inverted
         && let Some(id) = root_id
     {
-        let closure = assemble_ticket_subtree(tickets, selection, Orientation::Normal, id);
-        let scope = scoped_tickets(tickets, &closure);
+        let ids = closure_ids(tickets, selection, id);
+        let scope = scoped_tickets(tickets, &ids);
         return assemble_ticket_graph(&scope, selection, Orientation::Inverted, None);
     }
 
@@ -929,8 +1150,9 @@ mod tests {
     //
     // Decision B -- inside `children_recursively`, a candidate (already resolved
     // to a `&Ticket` by `ChildSource::children_of`) is added as a child iff
-    // (short-circuit `continue`s, in this order):
-    //   child(c) = matches_selection(c, selection) && seen.insert(c) && path.insert(c)
+    // (short-circuit `continue`s/`break`s, in this order):
+    //   child(c) = matches_selection(c, selection) && seen.insert(c)
+    //              && path.insert(c) && budget.take()
     //   c1 = matches_selection(c, selection)     [c passes the status filter]
     //   c2 = seen.insert(c)                       [c not already emitted from
     //                                              THIS SAME children_of()
@@ -948,24 +1170,36 @@ mod tests {
     //                                              after c's own recursion
     //                                              returns, before the next
     //                                              sibling is considered]
+    //   c4 = budget.take()                        [the node budget has not
+    //                                              been exhausted; checked
+    //                                              last so it is spent only
+    //                                              on candidates that already
+    //                                              passed c1-c3]
     // Independence pairs (outcome = candidate-is-a-child), each held against
-    // the (F,F,F)=emit baseline realized by an ordinary kept child in the
-    // cited fixture:
-    //   c1: (T,F,F)=skipped vs (F,F,F)=child
+    // the (T,T,T,T)=child baseline realized by an ordinary kept child in the
+    // cited fixture, holding every earlier condition true (the short-circuit
+    // means a later condition is only ever reached once every earlier one
+    // passed):
+    //   c1: (F,-,-,-)=skipped vs (T,T,T,T)=child
     //       -> selection_filters_nested_dependencies ("o"/"p" kept, closed "c"
-    //          rejected before `seen`/`path` are ever touched)
+    //          rejected before `seen`/`path`/`budget` are ever touched)
     //          (inverted analogue: inverted_open_selection_prunes_closed_dependant)
-    //   c2: (F,T,F)=skipped vs (F,F,F)=child
+    //   c2: (T,F,-,-)=skipped vs (T,T,T,T)=child
     //       -> duplicate_dependency_entry_renders_as_a_single_sibling (the
-    //          second "b" in `deps: [b, b]` is rejected by `seen` alone,
-    //          without ever reaching `path`) and its inverted mirror
-    //          inverted_duplicate_dependant_edge_renders_as_a_single_sibling
-    //   c3: (F,F,T)=skipped vs (F,F,F)=child
+    //          second "b" in `deps: [b, b]` passes selection but is rejected
+    //          by `seen` alone, without ever reaching `path`/`budget`) and its
+    //          inverted mirror inverted_duplicate_dependant_edge_renders_as_a_single_sibling
+    //   c3: (T,T,F,-)=skipped vs (T,T,T,T)=child
     //       -> dependency_cycle_terminates_without_repeating (back-edge to "a"
     //          passes selection and is the only occurrence in this call's own
     //          children list, so `seen` passes too, but "a" is already on the
     //          ancestor path -- a real cycle)
     //          (inverted analogue: inverted_dependency_cycle_terminates_without_repeating)
+    //   c4: (T,T,T,F)=skipped vs (T,T,T,T)=child
+    //       -> budget_boundary_is_exact (the one-budget-short case: "a4"
+    //          passes selection, is the only occurrence in "a3"'s children
+    //          list, and is not on the ancestor path, but the budget has
+    //          nothing left to give)
     // `path` being scoped to the ancestor chain and shrunk back immediately
     // per child (not deferred until every sibling is processed) is what lets
     // a ticket reachable through two *distinct* branches under the same root
@@ -979,14 +1213,28 @@ mod tests {
     // sibling edge as well as reachable through another sibling, so
     // `path`-removal timing specifically matters)
     // diamond_via_siblings_renders_identically_regardless_of_dep_order. The
-    // c1-before-c2/c3 ordering -- a selection-failing candidate must not
-    // occupy either slot -- is locked by
+    // c1-before-c2/c3/c4 ordering -- a selection-failing candidate must not
+    // occupy any later slot -- is locked by
     // inverted_selection_failing_duplicate_id_dependant_does_not_block_open_copy
     // (a `seen`-then-`path` slot that a selection-failing duplicate-id
-    // dependant must not consume).
+    // dependant must not consume) and by budget_boundary_is_exact /
+    // fallback_sweep_stops_cleanly_once_the_regular_walk_exhausts_the_budget
+    // (a selection-failing or already-represented candidate must not consume
+    // `budget` either, since `c4` is reached only after c1-c3 already hold).
     // The separate single-condition decision in `ChildSource::children_of`'s
     // `Deps` arm (a dep id resolves via `lookup`) drops unknown dep ids before
     // the walk; branch coverage: dependency_missing_from_lookup_is_skipped.
+    //
+    // The trailing `if !budget.take() { break; }` checks in
+    // `assemble_ticket_forest_bounded`'s and `assemble_ticket_subtree_bounded`'s
+    // own root loop and fallback-sweep loop are single-condition (branch
+    // coverage only, since every other filter in those loops has already run
+    // by the time `budget.take()` is reached): the false (denied) arm is
+    // covered by dense_layered_ladder_truncates_with_the_marker (root loop)
+    // and fallback_sweep_stops_cleanly_once_the_regular_walk_exhausts_the_budget
+    // (fallback-sweep loop); the true (permitted) arm by any test that
+    // renders a non-empty forest without the marker, e.g.
+    // shallow_store_is_identical_bounded_and_unbounded.
     //
     // Decision D -- inverted-orientation root eligibility (`is_root`'s Inverted arm):
     //   root_inv(t) = !t.deps().iter().any(|d| lookup.contains_key(d))
@@ -2088,6 +2336,196 @@ mod tests {
             CHAIN_LEN,
             "every ticket in the chain and cycle must be represented"
         );
+    }
+
+    /// Recursively counts every [`TicketNode`] in `nodes` and its descendants.
+    fn count_nodes(nodes: &[TicketNode]) -> usize {
+        nodes.len()
+            + nodes
+                .iter()
+                .map(|n| count_nodes(&n.children))
+                .sum::<usize>()
+    }
+
+    /// A densely layered ladder: two tickets per level (`l{level}a`,
+    /// `l{level}b`), each depending on BOTH tickets in the next level, so
+    /// the store has `2 * levels` tickets but `O(2^levels)` rendered
+    /// dependency paths if unbounded. `l0a`/`l0b` are the top
+    /// (`Normal`-orientation root) tickets; the last level's tickets are the
+    /// leaves.
+    fn dense_ladder(levels: usize) -> Vec<Ticket> {
+        let mut tickets = Vec::new();
+        for level in 0..levels {
+            for branch in ["a", "b"] {
+                let id = format!("l{level}{branch}");
+                if level + 1 < levels {
+                    let next_a = format!("l{}a", level + 1);
+                    let next_b = format!("l{}b", level + 1);
+                    tickets.push(ticket(&id, StatusValue::Open, 2, &[&next_a, &next_b]));
+                } else {
+                    tickets.push(ticket(&id, StatusValue::Open, 2, &[]));
+                }
+            }
+        }
+        tickets
+    }
+
+    #[test]
+    fn dense_layered_ladder_truncates_with_the_marker() {
+        // Guards the default budget against a hang/OOM on exactly the shape
+        // this bounded expansion exists to cap, using the real default.
+        let tickets = dense_ladder(24);
+
+        let forest = assemble_ticket_forest_bounded(
+            &tickets,
+            TicketSelection::All,
+            Orientation::Normal,
+            Some(DEFAULT_NODE_BUDGET),
+        );
+
+        assert_eq!(
+            count_nodes(&forest),
+            DEFAULT_NODE_BUDGET + 1,
+            "exactly the budget's worth of real nodes plus the marker"
+        );
+        let marker = forest.last().expect("forest must not be empty");
+        assert_eq!(marker.id, "");
+        assert!(marker.summary.contains("truncated"));
+        assert!(marker.summary.contains(&DEFAULT_NODE_BUDGET.to_string()));
+    }
+
+    #[test]
+    fn scoped_inverted_root_on_dense_ladder_completes_and_truncates() {
+        // Regression: `--root <top-of-ladder> --inverted`'s scope must be
+        // computed by the linear `closure_ids`, not by materializing a
+        // `Normal` subtree -- the latter would exponentially blow up on
+        // exactly this shape (l0a's own Normal closure IS the whole dense
+        // ladder) despite the render-side budget, since the closure step ran
+        // to completion before the budget was ever consulted. `l0a` is a
+        // top-level (Normal-root) ticket; rendering its closure Inverted
+        // must still complete quickly and respect the default budget.
+        let tickets = dense_ladder(24);
+
+        let forest = assemble_ticket_subtree_bounded(
+            &tickets,
+            TicketSelection::All,
+            Orientation::Inverted,
+            "l0a",
+            Some(DEFAULT_NODE_BUDGET),
+        );
+
+        assert_eq!(
+            count_nodes(&forest),
+            DEFAULT_NODE_BUDGET + 1,
+            "exactly the budget's worth of real nodes plus the marker"
+        );
+        assert!(
+            forest.iter().any(|n| n.id.is_empty()),
+            "truncation marker must be present"
+        );
+    }
+
+    #[test]
+    fn shallow_store_is_identical_bounded_and_unbounded() {
+        // A store nowhere near the cap must render byte-for-byte the same
+        // whether or not a budget is applied, with no marker either way --
+        // the default behaviour on realistic (shallow, sparse) stores is
+        // unchanged by this feature.
+        let tickets = vec![
+            ticket("a", StatusValue::Open, 2, &["b", "c"]),
+            ticket("b", StatusValue::Open, 2, &["d"]),
+            ticket("c", StatusValue::Open, 2, &["d"]),
+            ticket("d", StatusValue::Open, 2, &[]),
+        ];
+        let bounded = assemble_ticket_forest_bounded(
+            &tickets,
+            TicketSelection::All,
+            Orientation::Normal,
+            Some(DEFAULT_NODE_BUDGET),
+        );
+        let unbounded = assemble_ticket_forest_bounded(
+            &tickets,
+            TicketSelection::All,
+            Orientation::Normal,
+            None,
+        );
+        assert_eq!(bounded, unbounded);
+        assert_eq!(
+            bounded,
+            assemble_ticket_forest(&tickets, TicketSelection::All, Orientation::Normal),
+            "the plain entry point matches the explicitly bounded one"
+        );
+        assert!(
+            bounded.iter().all(|n| !n.id.is_empty()),
+            "no truncation marker expected on a shallow store"
+        );
+    }
+
+    #[test]
+    fn budget_boundary_is_exact() {
+        // Decision B, c4 independence pair (T,T,T,F)=skipped vs
+        // (T,T,T,T)=child. A linear 5-ticket chain (a0->a1->a2->a3->a4)
+        // renders exactly 5 nodes when unbounded. A budget of exactly 5 must
+        // not append a marker (nothing was cut off); a budget of 4 -- one
+        // short -- must append exactly one.
+        let tickets = vec![
+            ticket("a0", StatusValue::Open, 2, &["a1"]),
+            ticket("a1", StatusValue::Open, 2, &["a2"]),
+            ticket("a2", StatusValue::Open, 2, &["a3"]),
+            ticket("a3", StatusValue::Open, 2, &["a4"]),
+            ticket("a4", StatusValue::Open, 2, &[]),
+        ];
+
+        let exact = assemble_ticket_forest_bounded(
+            &tickets,
+            TicketSelection::All,
+            Orientation::Normal,
+            Some(5),
+        );
+        assert_eq!(count_nodes(&exact), 5, "the full chain fits exactly");
+        assert_eq!(root_ids(&exact), vec!["a0"], "no marker root appended");
+
+        let one_short = assemble_ticket_forest_bounded(
+            &tickets,
+            TicketSelection::All,
+            Orientation::Normal,
+            Some(4),
+        );
+        assert_eq!(
+            root_ids(&one_short),
+            vec!["a0", ""],
+            "the marker is appended as a second top-level root once a4 is cut off"
+        );
+        assert_eq!(
+            count_nodes(&one_short) - 1,
+            4,
+            "four real nodes, plus the marker"
+        );
+    }
+
+    #[test]
+    fn fallback_sweep_stops_cleanly_once_the_regular_walk_exhausts_the_budget() {
+        // `r` is a genuine Normal root that alone consumes the whole (tiny)
+        // budget; `a`/`b` form an unrelated cycle that the fallback sweep
+        // would otherwise pick up. The sweep still runs (it always does, to
+        // determine whether it has anything to add) but must stop the
+        // instant budget denies its first eligible candidate, terminating
+        // cleanly with the marker present and the cycle left unrepresented,
+        // rather than hanging or silently omitting the marker.
+        let tickets = vec![
+            ticket("r", StatusValue::Open, 2, &[]),
+            ticket("a", StatusValue::Open, 2, &["b"]),
+            ticket("b", StatusValue::Open, 2, &["a"]),
+        ];
+
+        let forest = assemble_ticket_forest_bounded(
+            &tickets,
+            TicketSelection::All,
+            Orientation::Normal,
+            Some(1),
+        );
+        assert_eq!(root_ids(&forest), vec!["r", ""]);
+        assert!(forest[1].summary.contains("truncated"));
     }
 
     #[test]

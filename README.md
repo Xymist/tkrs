@@ -89,8 +89,12 @@ Claude Opus picks it up naturally from there. Other models may need additional g
   the scope that happens to depend on one of its members never appears.
   Output repeats a ticket once per distinct dependency path reaching
   it, so on a densely diamond-shaped dependency graph the tree can
-  grow rapidly (there is no truncation); prefer `tk graph` there,
-  since it dedupes each ticket to a single node
+  grow rapidly; assembly is capped at 10000 rendered nodes per
+  invocation (`tk tui` uses the same cap to protect redraws), and
+  a `[!] output truncated at 10000 nodes ...` marker is appended as
+  the last top-level entry when the cap is hit — pass `--unbounded`
+  to lift it, or prefer `tk graph`, which dedupes each ticket to a
+  single node and needs no cap
 - `tk graph` — print the ticket graph as a Mermaid `flowchart TD` to
   stdout, for sharing project plans with nontechnical stakeholders;
   accepts the same `-s/--status`, `--inverted`, and `-r/--root` flags

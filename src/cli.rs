@@ -14,8 +14,8 @@ use time::format_description::well_known::Rfc3339;
 use crate::fs::write_ticket;
 use crate::publish::{self, GithubPublishArgs};
 use crate::tree::{
-    Orientation, TicketSelection, assemble_ticket_forest, assemble_ticket_graph,
-    assemble_ticket_subtree, print_forest, print_mermaid,
+    DEFAULT_NODE_BUDGET, Orientation, TicketSelection, assemble_ticket_forest_bounded,
+    assemble_ticket_graph, assemble_ticket_subtree_bounded, print_forest, print_mermaid,
 };
 use crate::{
     LinkOp, RemovalOutcome, Ticket, TicketBody, apply_query_filter, build_link_plan, dep_add,
@@ -529,6 +529,12 @@ pub struct TreeArgs {
         help = "Restrict output to the subtree rooted at this ticket (partial ID accepted); --status still applies to the root itself, so a root that fails the filter yields empty output"
     )]
     root: Option<String>,
+
+    #[arg(
+        long = "unbounded",
+        help = "tree only: lift the default 10000-node cap (a densely diamond-shaped dependency graph can otherwise grow without bound); tk graph is already linear in store size and ignores this flag"
+    )]
+    unbounded: bool,
 }
 
 /// `tk publish <target>`: nested like `dep`, so further publish targets can
@@ -1373,12 +1379,23 @@ pub fn cmd_tree(args: TreeArgs) -> color_eyre::Result<()> {
     } else {
         Orientation::Normal
     };
+    let node_budget = if args.unbounded {
+        None
+    } else {
+        Some(DEFAULT_NODE_BUDGET)
+    };
     let forest = match &args.root {
         Some(root) => {
             let root_id = resolve_partial_id(&tickets, root)?;
-            assemble_ticket_subtree(&tickets, args.status, orientation, &root_id)
+            assemble_ticket_subtree_bounded(
+                &tickets,
+                args.status,
+                orientation,
+                &root_id,
+                node_budget,
+            )
         }
-        None => assemble_ticket_forest(&tickets, args.status, orientation),
+        None => assemble_ticket_forest_bounded(&tickets, args.status, orientation, node_budget),
     };
     print_forest(&forest);
     Ok(())

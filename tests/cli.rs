@@ -3671,6 +3671,16 @@ fn duplicate_ticket_id_is_rejected_at_load_for_tree_ls_and_graph() {
 }
 
 #[test]
+fn empty_ticket_id_is_rejected_at_load() {
+    let temp = TempDir::new().unwrap();
+    write_ticket_at(&temp, "empty.md", "");
+
+    tk_cmd(&temp).arg("tree").assert().failure().stderr(
+        predicate::str::contains("empty ticket id").and(predicate::str::contains("empty.md")),
+    );
+}
+
+#[test]
 fn multiple_duplicated_ticket_ids_are_all_listed_in_one_error() {
     let temp = TempDir::new().unwrap();
     write_ticket_at(&temp, "a.md", "x-1111");
@@ -3686,4 +3696,95 @@ fn multiple_duplicated_ticket_ids_are_all_listed_in_one_error() {
             .and(predicate::str::contains("c.md"))
             .and(predicate::str::contains("d.md")),
     );
+}
+
+/// Writes a densely layered ladder: two tickets per level, each depending on
+/// both tickets in the next level, so the store has `2 * levels` tickets but
+/// `O(2^levels)` rendered dependency paths. Written directly as files (not
+/// via `tk create`/`tk dep` round-trips) so the fixture stays fast to build
+/// regardless of `levels`.
+fn write_layered_ladder(dir: &TempDir, levels: usize) {
+    for level in 0..levels {
+        for branch in ["a", "b"] {
+            let id = format!("l{level}{branch}");
+            if level + 1 < levels {
+                let next_a = format!("l{}a", level + 1);
+                let next_b = format!("l{}b", level + 1);
+                write_ticket_with_fields(
+                    dir,
+                    &id,
+                    &id,
+                    "open",
+                    &[&next_a, &next_b],
+                    &[],
+                    &[],
+                    None,
+                    "",
+                );
+            } else {
+                write_ticket_with_fields(dir, &id, &id, "open", &[], &[], &[], None, "");
+            }
+        }
+    }
+}
+
+#[test]
+fn tree_truncates_dense_layered_ladder_with_marker_and_exits_zero() {
+    let temp = TempDir::new().unwrap();
+    write_layered_ladder(&temp, 24);
+
+    let out = tk_cmd(&temp).arg("tree").output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("truncated at 10000 nodes"));
+    assert!(stdout.contains("--unbounded"));
+}
+
+#[test]
+fn tree_unbounded_on_a_moderately_dense_store_emits_everything() {
+    let temp = TempDir::new().unwrap();
+    // 14 levels: 2 * (2^14 - 1) rendered paths comfortably exceeds the
+    // default cap while staying fast enough to render in full.
+    write_layered_ladder(&temp, 14);
+
+    let bounded = tk_cmd(&temp).arg("tree").output().unwrap();
+    assert!(bounded.status.success());
+    assert!(String::from_utf8_lossy(&bounded.stdout).contains("truncated"));
+
+    let unbounded = tk_cmd(&temp)
+        .arg("tree")
+        .arg("--unbounded")
+        .output()
+        .unwrap();
+    assert!(unbounded.status.success());
+    let unbounded_out = String::from_utf8_lossy(&unbounded.stdout);
+    assert!(
+        !unbounded_out.contains("truncated"),
+        "no marker once unbounded"
+    );
+    // The deepest level's tickets only appear at all if the full depth of
+    // the ladder was actually reached.
+    assert!(unbounded_out.contains("l13a"));
+    assert!(unbounded_out.contains("l13b"));
+}
+
+#[test]
+fn tree_root_inverted_on_dense_ladder_top_completes_and_truncates() {
+    // Regression: `--root <top> --inverted`'s scope computation must be a
+    // linear id-set walk, not a materialized Normal subtree -- l0a's own
+    // Normal closure IS the entire dense ladder, so the old approach
+    // exponentially blew up here despite the render-side budget.
+    let temp = TempDir::new().unwrap();
+    write_layered_ladder(&temp, 24);
+
+    let out = tk_cmd(&temp)
+        .arg("tree")
+        .arg("--root")
+        .arg("l0a")
+        .arg("--inverted")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("truncated at 10000 nodes"));
 }

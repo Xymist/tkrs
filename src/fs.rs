@@ -52,9 +52,35 @@ pub fn read_all_tickets() -> color_eyre::Result<Vec<Ticket>> {
         }
     }
 
+    reject_empty_ids(&tickets)?;
     reject_duplicate_ids(&tickets)?;
 
     Ok(tickets)
+}
+
+/// Every ticket must have a non-empty, non-whitespace-only frontmatter
+/// `id:`. The forest and graph assembly's synthetic truncation marker node
+/// uses the empty string as its own reserved id specifically because no
+/// real ticket id is ever empty; enforcing that here, at load, is what
+/// keeps the invariant real rather than merely documented. Checked before
+/// [`reject_duplicate_ids`] so an empty id gets this more specific,
+/// actionable message instead of being reported as a confusing "duplicate
+/// ticket id ''" when more than one file has one.
+fn reject_empty_ids(tickets: &[Ticket]) -> color_eyre::Result<()> {
+    let mut offending: Vec<&Path> = tickets
+        .iter()
+        .filter(|t| t.id().trim().is_empty())
+        .map(|t| t.path.as_path())
+        .collect();
+    if offending.is_empty() {
+        return Ok(());
+    }
+    offending.sort();
+
+    Err(eyre!(
+        "empty ticket id in {}; fix the id: field so it is non-empty",
+        join_with_and(&offending)
+    ))
 }
 
 /// Every ticket id must be claimed by exactly one file: assembly (`src/tree.rs`
@@ -364,5 +390,41 @@ mod tests {
         assert!(err.contains("b.md"));
         assert!(err.contains("c.md"));
         assert!(err.contains("d.md"));
+    }
+
+    #[test]
+    fn reject_empty_ids_allows_a_store_with_non_empty_ids() {
+        let tickets = vec![ticket_at("a", "a.md"), ticket_at("b", "b.md")];
+        assert!(reject_empty_ids(&tickets).is_ok());
+    }
+
+    #[test]
+    fn reject_empty_ids_names_the_file_for_an_empty_id() {
+        let tickets = vec![ticket_at("", ".tickets/empty.md")];
+        let err = reject_empty_ids(&tickets).unwrap_err().to_string();
+        assert!(err.contains(".tickets/empty.md"));
+        assert!(err.contains("empty"));
+    }
+
+    #[test]
+    fn reject_empty_ids_treats_whitespace_only_as_empty() {
+        let tickets = vec![ticket_at("   ", ".tickets/blank.md")];
+        let err = reject_empty_ids(&tickets).unwrap_err().to_string();
+        assert!(err.contains(".tickets/blank.md"));
+    }
+
+    #[test]
+    fn reject_empty_ids_lists_every_offending_file_in_one_error() {
+        let tickets = vec![
+            ticket_at("", "b.md"),
+            ticket_at("", "a.md"),
+            ticket_at("x-1234", "c.md"),
+        ];
+        let err = reject_empty_ids(&tickets).unwrap_err().to_string();
+        assert!(err.contains("a.md and b.md"), "sorted, both listed: {err}");
+        assert!(
+            !err.contains("c.md"),
+            "the non-empty id must not be flagged"
+        );
     }
 }

@@ -187,6 +187,12 @@ impl<'a> TuiApp<'a> {
     /// top-level identifiers -- unreachable from disk data once the ticket
     /// store itself rejects a duplicate id at load time, but this boundary
     /// stays defensive rather than trusting that invariant from afar.
+    ///
+    /// On a densely diamond-shaped store, `assemble_ticket_tree` applies the
+    /// same default node cap `tk tree` does, so a `[!] output truncated ...`
+    /// marker is an expected top-level pane entry rather than a bug -- the
+    /// cap exists specifically to protect redraws here, and there is no TUI
+    /// escape hatch equivalent to `--unbounded`.
     fn render_ticket_tree(
         &mut self,
         area: Rect,

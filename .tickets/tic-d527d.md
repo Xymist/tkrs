@@ -1,13 +1,14 @@
 ---
 id: tic-d527d
 type: chore
-status: open
+status: closed
 deps: []
 links: []
 priority: 3
 assignee: Xymist
 tags: []
 created: 2026-07-21T20:15:09.028411146Z
+closed_at: 2026-07-21T22:09:27.023021443Z
 ---
 # Replace per-candidate sink-SCC reachability with one Tarjan/Kosaraju condensation
 
@@ -23,4 +24,4 @@ Single SCC pass replaces per-candidate reachability; existing tree/graph tests u
 
 ## Notes
 
--
+- [status_change: open -> closed] Shipped: iterative Kosaraju condensation, O(1) sweep eligibility, deleted per-candidate DFS helpers. Committed as tic-d527d. @ 2026-07-21 22:09:27 UTC

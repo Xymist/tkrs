@@ -56,9 +56,12 @@ ID matching works for `show`, `start`, `close`, `edit`, etc.
   only re-presents that same fixed scope leaf-first, ascending back to
   the root, so a ticket outside the scope that depends on one of its
   members is still excluded. Output repeats a ticket once per distinct
-  dependency path reaching it (no truncation), so a densely
-  diamond-shaped graph grows rapidly -- prefer `graph` there, since it
-  dedupes each ticket to a single node
+  dependency path reaching it, so a densely diamond-shaped graph grows
+  rapidly; assembly is capped at 10000 rendered nodes (`tui` uses the
+  same cap), with a `[!] output truncated at 10000 nodes ...` marker
+  appended as the last top-level entry when hit -- pass `--unbounded`
+  to lift the cap (tree only; `graph` ignores the flag, since it
+  already dedupes and needs no cap)
 - `graph` -- print the ticket dependency graph as a Mermaid
   `flowchart TD` to stdout (for sharing plans with nontechnical
   stakeholders); takes the same `--status`, `--inverted`, and
