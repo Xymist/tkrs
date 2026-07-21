@@ -3,7 +3,8 @@ id: tic-b949a
 type: task
 status: open
 deps: []
-links: []
+links:
+- tic-554ef
 priority: 2
 assignee: Xymist
 tags: []

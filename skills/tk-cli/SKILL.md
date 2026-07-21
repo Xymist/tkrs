@@ -42,13 +42,19 @@ ID matching works for `show`, `start`, `close`, `edit`, etc.
   (`--status all|open|in-progress|closed`, default `open`); mirrors
   the `tui` tree pane's ordering and nesting; `--inverted` walks the
   reversed graph, rooting at leaf work items and nesting dependants;
-  `-r/--root <id>` restricts output to one ticket's subtree (partial
-  IDs accepted), with `--status` still applied to the root itself
+  `-r/--root <id>` restricts output to one ticket's *scope* -- that
+  ticket plus its selection-filtered dependency closure (partial IDs
+  accepted, `--status` still applied to the root itself). `--inverted`
+  combined with `--root` does **not** switch to walking dependants: it
+  only re-presents that same fixed scope leaf-first, ascending back to
+  the root, so a ticket outside the scope that depends on one of its
+  members is still excluded
 - `graph` -- print the ticket dependency graph as a Mermaid
   `flowchart TD` to stdout (for sharing plans with nontechnical
   stakeholders); takes the same `--status`, `--inverted`, and
-  `-r/--root` flags as `tree` but dedupes each ticket to a single
-  node while keeping every selection-passing edge, so a shared
+  `-r/--root` flags as `tree`, including the scope-then-orientation
+  `--root`/`--inverted` combination above, but dedupes each ticket to a
+  single node while keeping every selection-passing edge, so a shared
   dependency shows as one node with multiple incoming arrows instead
   of repeating per branch; without `--root`, every selection-matching
   ticket gets a node even when no root reaches it (rootless

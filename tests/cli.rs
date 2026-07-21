@@ -3133,8 +3133,10 @@ fn tree_root_composes_with_inverted_and_status() {
     tk_cmd(&temp).arg("dep").arg(&m).arg(&l).assert().success();
     tk_cmd(&temp).arg("dep").arg(&e).arg(&m).assert().success();
 
-    // Inverted subtree rooted at mid walks its dependants (epic), not its own
-    // dependency (leaf).
+    // --root fixes the scope to `m`'s own dependency closure ({m, l});
+    // --inverted only changes how that fixed scope is presented (leaf-first).
+    // `e` is never part of `m`'s own closure (it depends on `m`, not the
+    // other way around), so it must not appear.
     tk_cmd(&temp)
         .arg("tree")
         .arg("--root")
@@ -3142,22 +3144,23 @@ fn tree_root_composes_with_inverted_and_status() {
         .arg("--inverted")
         .assert()
         .success()
-        .stdout(predicate::str::contains(&m))
-        .stdout(predicate::str::contains(&e))
-        .stdout(predicate::str::contains(&l).not());
-
-    // Close the epic: default open selection prunes it from the subtree,
-    // `--status all` brings it back.
-    tk_cmd(&temp).arg("close").arg(&e).assert().success();
-    tk_cmd(&temp)
-        .arg("tree")
-        .arg("--root")
-        .arg(&m)
-        .arg("--inverted")
-        .assert()
-        .success()
+        .stdout(predicate::str::contains(&l))
         .stdout(predicate::str::contains(&m))
         .stdout(predicate::str::contains(&e).not());
+
+    // Close the leaf: default open selection prunes it from the scope (and
+    // so from the inverted rendering too), leaving only `m`; `--status all`
+    // brings it back.
+    tk_cmd(&temp).arg("close").arg(&l).assert().success();
+    tk_cmd(&temp)
+        .arg("tree")
+        .arg("--root")
+        .arg(&m)
+        .arg("--inverted")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&m))
+        .stdout(predicate::str::contains(&l).not());
     tk_cmd(&temp)
         .arg("tree")
         .arg("--root")
@@ -3167,7 +3170,41 @@ fn tree_root_composes_with_inverted_and_status() {
         .arg("all")
         .assert()
         .success()
-        .stdout(predicate::str::contains(&e));
+        .stdout(predicate::str::contains(&l));
+}
+
+#[test]
+fn tree_root_epic_inverted_is_leaf_first_and_excludes_out_of_scope_dependant() {
+    let temp = TempDir::new().unwrap();
+    let l = tree_create(&temp, "Leaf");
+    let m = tree_create(&temp, "Mid");
+    let e = tree_create(&temp, "Epic");
+    let z = tree_create(&temp, "Zeta");
+    // Chain epic -> mid -> leaf; zeta depends on the epic (outside its scope).
+    tk_cmd(&temp).arg("dep").arg(&m).arg(&l).assert().success();
+    tk_cmd(&temp).arg("dep").arg(&e).arg(&m).assert().success();
+    tk_cmd(&temp).arg("dep").arg(&z).arg(&e).assert().success();
+
+    let out = tk_cmd(&temp)
+        .arg("tree")
+        .arg("--root")
+        .arg(&e)
+        .arg("--inverted")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // Leaf-first: the leaf nests above mid, which nests above the epic.
+    let l_pos = stdout.find(l.as_str()).expect("leaf present");
+    let m_pos = stdout.find(m.as_str()).expect("mid present");
+    let e_pos = stdout.find(e.as_str()).expect("epic present");
+    assert!(l_pos < m_pos && m_pos < e_pos);
+    assert!(
+        !stdout.contains(z.as_str()),
+        "zeta depends on the epic rather than being depended on by it, so it is \
+         out of the epic's own dependency closure: {stdout}"
+    );
 }
 
 #[test]
@@ -3292,6 +3329,42 @@ fn graph_root_partial_restricts_and_inverted_flips_edges() {
     assert!(restricted_out.contains(&format!("{m_s} --> {l_s}")));
     assert!(!restricted_out.contains(&e_s));
     assert!(!restricted_out.contains(&z_s));
+}
+
+#[test]
+fn graph_root_epic_inverted_emits_dependency_to_dependant_edges_within_scope() {
+    let temp = TempDir::new().unwrap();
+    let l = tree_create(&temp, "Leaf");
+    let m = tree_create(&temp, "Mid");
+    let e = tree_create(&temp, "Epic");
+    let z = tree_create(&temp, "Zeta");
+    // Chain epic -> mid -> leaf; zeta depends on the epic (outside its scope).
+    tk_cmd(&temp).arg("dep").arg(&m).arg(&l).assert().success();
+    tk_cmd(&temp).arg("dep").arg(&e).arg(&m).assert().success();
+    tk_cmd(&temp).arg("dep").arg(&z).arg(&e).assert().success();
+
+    let l_s = mermaid_id(&l);
+    let m_s = mermaid_id(&m);
+    let e_s = mermaid_id(&e);
+    let z_s = mermaid_id(&z);
+
+    // --root fixes the scope to the epic's own closure ({e, m, l}); --inverted
+    // presents it dependency --> dependant, leaf-first, ending at the epic.
+    let out = tk_cmd(&temp)
+        .arg("graph")
+        .arg("--root")
+        .arg(&e)
+        .arg("--inverted")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(&format!("{l_s} --> {m_s}")));
+    assert!(stdout.contains(&format!("{m_s} --> {e_s}")));
+    assert!(
+        !stdout.contains(&z_s),
+        "zeta is outside the epic's own dependency closure: {stdout}"
+    );
 }
 
 #[test]

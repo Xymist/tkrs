@@ -71,14 +71,19 @@ Claude Opus picks it up naturally from there. Other models may need additional g
   graph instead — roots are leaf work items with no resolvable
   dependency, and each node nests the tickets that depend on it, so an
   epic reachable from several leaves appears once per path;
-  `-r/--root <id>` restricts output to the single subtree rooted at
-  that ticket (partial IDs accepted), walked in the requested
-  orientation — `--status` still applies to the root itself, so a root
-  that fails the filter yields empty output
+  `-r/--root <id>` restricts output to a single ticket's *scope* — that
+  ticket plus its selection-filtered dependency closure, exactly the
+  set the normal-orientation walk reaches (partial IDs accepted;
+  `--status` still applies to the root itself, so a root that fails
+  the filter yields empty output); `--inverted` only changes how that
+  fixed scope is presented — leaf-first, ascending back to the root —
+  rather than changing which tickets are in scope, so a ticket outside
+  the scope that happens to depend on one of its members never appears
 - `tk graph` — print the ticket graph as a Mermaid `flowchart TD` to
   stdout, for sharing project plans with nontechnical stakeholders;
   accepts the same `-s/--status`, `--inverted`, and `-r/--root` flags
-  as `tk tree` and applies them identically, but unlike `tk tree` each
+  as `tk tree` and applies them identically (including `--root`'s
+  scope-then-orientation semantics above), but unlike `tk tree` each
   ticket is emitted as a single deduped node while every
   selection-passing dependency edge reaching it is still recorded (so
   a diamond-shaped dependency shows up as one node with two incoming

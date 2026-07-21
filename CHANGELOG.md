@@ -1,5 +1,28 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- `tk tree --root <id> --inverted` and `tk graph --root <id> --inverted`
+  no longer collapse to almost nothing when `<id>` is an epic. `--root`
+  now selects a *scope* -- the ticket plus its selection-filtered
+  dependency closure, exactly what the normal-orientation `--root` walk
+  reaches -- and `--inverted` only changes how that fixed scope is
+  presented (leaf-first, ascending back to the root) instead of
+  changing which tickets are in scope. A ticket outside the scope that
+  happens to depend on one of its members is still excluded.
+  Normal-orientation `--root` output is unchanged. Note the resulting
+  behaviour change: `--root <leaf> --inverted` no longer means "every
+  transitive dependant of `<leaf>`" -- it now means just `<leaf>`
+  itself, since a leaf's own dependency closure is empty. `tk tree
+  --root <id> --inverted` also renders a scope whose bottom is a
+  dependency cycle instead of silently returning nothing, via a
+  deterministic fallback root seeded from the cycle's own sink
+  strongly-connected component -- a ticket merely upstream of the
+  cycle is never wrongly promoted to a second, standalone root of its
+  own; it is always nested beneath the cycle instead.
+
 ## [0.10.0] - 2026-07-21
 
 ### Added

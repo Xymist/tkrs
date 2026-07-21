@@ -75,27 +75,164 @@ pub fn assemble_ticket_forest(
         .collect()
 }
 
-/// Builds the single subtree rooted at `root_id`, walked in the requested
-/// `orientation`. Every ticket whose id equals `root_id` becomes its own
-/// root, in slice order, mirroring [`assemble_ticket_forest`]'s duplicate-id
-/// handling. `selection` applies to the root exactly as it does to every
-/// other level: a root that fails the filter yields an empty forest.
+/// Builds the tree for `--root root_id`. `--root` selects a *scope* --
+/// `root_id` plus its selection-filtered dependency closure, exactly the
+/// ticket set the `Normal`-orientation walk below reaches -- and
+/// `orientation` only changes how that fixed scope is presented:
+///
+/// - `Normal`: walks the scope directly. Every ticket whose id equals
+///   `root_id` becomes its own root, in slice order, mirroring
+///   [`assemble_ticket_forest`]'s duplicate-id handling. `selection` applies
+///   to the root exactly as it does to every other level: a root that fails
+///   the filter yields an empty forest, and the closure itself stops at any
+///   ticket that fails `selection` (its own dependencies never enter the
+///   scope).
+/// - `Inverted`: first computes the scope via the `Normal` walk above, then
+///   re-runs the unrestricted [`assemble_ticket_forest`] in `Inverted`
+///   orientation over the scope alone. The scope's own leaves become roots
+///   and nesting grows toward `root_id`, so a ticket outside the scope that
+///   happens to depend on a scope member is never pulled in. Unlike the
+///   unrestricted `tk tree`/`tui` case, a scope whose bottom is a dependency
+///   cycle is never silently dropped: any not-yet-covered scope member that
+///   belongs to a sink strongly-connected component (see
+///   [`is_in_sink_scc`]) becomes an additional fallback root, in slice
+///   order, deterministically breaking the cycle. A ticket merely upstream
+///   of a cycle is excluded from that fallback -- it always arrives as a
+///   dependant nested beneath the cycle's own fallback root instead.
 pub fn assemble_ticket_subtree(
     tickets: &[Ticket],
     selection: TicketSelection,
     orientation: Orientation,
     root_id: &str,
 ) -> Vec<TicketNode> {
+    if orientation == Orientation::Inverted {
+        let closure = assemble_ticket_subtree(tickets, selection, Orientation::Normal, root_id);
+        let scope = scoped_tickets(tickets, &closure);
+        let mut forest = assemble_ticket_forest(&scope, selection, Orientation::Inverted);
+
+        // A scope whose bottom is a dependency cycle (every member has a
+        // resolvable in-scope dep) has no eligible inverted root at all, so
+        // the walk above would otherwise return empty and silently hide the
+        // whole scope. Sweep the scope, in slice order, for any
+        // selection-matching, not-yet-represented member that is also
+        // eligible (`is_in_sink_scc`), and give it its own root branch -- the
+        // per-root `visited` guard in `build_root_node` still terminates the
+        // cycle. Eligibility excludes a ticket merely upstream of a cycle
+        // (like an epic that depends into it): such a ticket is never a sink
+        // SCC member, so it is always represented as a dependant nested
+        // beneath the cycle's own fallback root instead of wrongly becoming
+        // a second, standalone root of its own. Each fallback root's own ids
+        // are folded back into `represented` immediately (not just the
+        // swept ticket's own id), so a later cycle member already covered by
+        // an earlier fallback root's branch is skipped instead of starting a
+        // second, redundant root.
+        let mut represented = HashSet::new();
+        collect_node_ids(&forest, &mut represented);
+
+        let scope_lookup: HashMap<&str, &Ticket> = scope.iter().map(|t| (t.id(), t)).collect();
+        let source = ChildSource::Dependants(build_inverted_adjacency(&scope));
+        for ticket in &scope {
+            if !matches_selection(ticket, selection)
+                || represented.contains(ticket.id())
+                || !is_in_sink_scc(ticket, &scope_lookup)
+            {
+                continue;
+            }
+            let node = build_root_node(ticket, &source, selection);
+            collect_node_ids(std::slice::from_ref(&node), &mut represented);
+            forest.push(node);
+        }
+
+        return forest;
+    }
+
     let lookup: HashMap<&str, &Ticket> = tickets.iter().map(|t| (t.id(), t)).collect();
-    let source = match orientation {
-        Orientation::Normal => ChildSource::Deps(&lookup),
-        Orientation::Inverted => ChildSource::Dependants(build_inverted_adjacency(tickets)),
-    };
+    let source = ChildSource::Deps(&lookup);
 
     eligible_roots(tickets, selection, orientation, Some(root_id), &lookup)
         .into_iter()
         .map(|ticket| build_root_node(ticket, &source, selection))
         .collect()
+}
+
+/// The ticket subset for a `--root root_id` scope: every ticket from
+/// `tickets` whose id appears anywhere in `closure` (the `Normal`-orientation
+/// subtree already assembled for that root), preserving `tickets`' original
+/// slice order rather than walk-discovery order. Membership is by id, so a
+/// duplicate-id ticket enters the scope whenever any ticket sharing its id is
+/// reached by the normal walk -- the same duplicate-id handling used
+/// everywhere else in this module, just applied to a whole-slice filter
+/// instead of a single walk.
+fn scoped_tickets(tickets: &[Ticket], closure: &[TicketNode]) -> Vec<Ticket> {
+    let mut closure_ids = HashSet::new();
+    collect_node_ids(closure, &mut closure_ids);
+
+    tickets
+        .iter()
+        .filter(|t| closure_ids.contains(t.id()))
+        .cloned()
+        .collect()
+}
+
+/// Collects the id of every node in `nodes` and all of their descendants,
+/// recursively, into `ids`.
+fn collect_node_ids(nodes: &[TicketNode], ids: &mut HashSet<String>) {
+    for node in nodes {
+        ids.insert(node.id.clone());
+        collect_node_ids(&node.children, ids);
+    }
+}
+
+/// True if `ticket` belongs to a sink strongly-connected component of
+/// `scope_lookup`'s raw dependency graph -- every scope ticket transitively
+/// reachable from `ticket` via resolvable `deps()` can also transitively
+/// reach `ticket` back. A ticket with no resolvable in-scope dependency at
+/// all is vacuously eligible (its forward-reachable set is empty), though in
+/// practice such a leaf is already an ordinary `Inverted` root before the
+/// fallback sweep in [`assemble_ticket_subtree`] runs.
+///
+/// This restricts the fallback sweep to genuine cycle (or singleton-leaf)
+/// members: a ticket merely upstream of a cycle has a resolvable dependency
+/// that can never reach it back, so it is excluded here and instead always
+/// arrives as a dependant nested beneath the cycle's own fallback root.
+///
+/// Reachability is resolved through `scope_lookup`, which keeps one ticket
+/// per id (last wins); for duplicate-id tickets with differing dep lists,
+/// eligibility is computed against that single instance rather than the
+/// union the rendering walk fans out over.
+fn is_in_sink_scc(ticket: &Ticket, scope_lookup: &HashMap<&str, &Ticket>) -> bool {
+    let forward = reachable_via_deps(ticket, scope_lookup);
+    forward.iter().all(|id| {
+        let Some(other) = scope_lookup.get(id.as_str()).copied() else {
+            // Invariant: `forward` only ever contains ids that resolved via
+            // `scope_lookup` in `reachable_via_deps`, so this never happens.
+            return true;
+        };
+        reachable_via_deps(other, scope_lookup).contains(ticket.id())
+    })
+}
+
+/// Every scope ticket id transitively reachable from `ticket` by following
+/// resolvable `deps()` edges: a plain worklist DFS. Scopes assembled for a
+/// single `--root` are small, so the O(n) traversal this performs per call
+/// (and the O(n^2) total across [`is_in_sink_scc`]'s callers) is fine.
+fn reachable_via_deps<'a>(
+    ticket: &'a Ticket,
+    scope_lookup: &HashMap<&str, &'a Ticket>,
+) -> HashSet<String> {
+    let mut visited = HashSet::new();
+    let mut stack = vec![ticket];
+    while let Some(current) = stack.pop() {
+        for dep_id in current.deps() {
+            let Some(dep_ticket) = scope_lookup.get(dep_id.as_str()).copied() else {
+                continue;
+            };
+            if visited.insert(dep_id.clone()) {
+                stack.push(dep_ticket);
+            }
+        }
+    }
+    visited
 }
 
 /// The roots a forest walk starts from: every ticket matching `root_id` (in
@@ -291,12 +428,29 @@ pub struct TicketGraph {
 /// fallback does not run when `root_id` is `Some`, so `--root` keeps
 /// restricting the graph to the requested subtree exactly as it restricts a
 /// `tk tree` subtree.
+///
+/// `root_id: Some` and `Orientation::Inverted` combine the same way
+/// [`assemble_ticket_subtree`] does: `--root` fixes the *scope* (`root_id`
+/// plus its selection-filtered dependency closure, per the `Normal`
+/// orientation), and `Inverted` only changes how that scope is presented --
+/// the unrestricted graph assembly (fallback sweep included, so a cycle
+/// inside the scope stays safe) runs over the scope alone, leaf-first, up to
+/// `root_id`. A ticket outside the scope that depends on a scope member is
+/// never pulled in.
 pub fn assemble_ticket_graph(
     tickets: &[Ticket],
     selection: TicketSelection,
     orientation: Orientation,
     root_id: Option<&str>,
 ) -> TicketGraph {
+    if orientation == Orientation::Inverted
+        && let Some(id) = root_id
+    {
+        let closure = assemble_ticket_subtree(tickets, selection, Orientation::Normal, id);
+        let scope = scoped_tickets(tickets, &closure);
+        return assemble_ticket_graph(&scope, selection, Orientation::Inverted, None);
+    }
+
     let lookup: HashMap<&str, &Ticket> = tickets.iter().map(|t| (t.id(), t)).collect();
     let source = match orientation {
         Orientation::Normal => ChildSource::Deps(&lookup),
@@ -657,6 +811,102 @@ mod tests {
     // visited_edges dedup skip arm by graph_duplicate_edges_are_recorded_once;
     // and the root-loop node dedup skip arm by
     // graph_duplicate_root_ids_dedupe_node_but_keep_each_branch.
+    //
+    // Decision G -- `assemble_ticket_graph`'s scope-then-invert guard, an AND
+    // of two independent conditions:
+    //   scope_invert(orientation, root_id) = (orientation == Inverted) && root_id.is_some()
+    //   c1 = orientation == Inverted
+    //   c2 = root_id.is_some()
+    // Independence pairs (outcome = scope computed via the Normal closure,
+    // then re-run as an unrestricted Inverted assembly over the scope alone):
+    //   c1: (T,T)=scoped-invert vs (F,T)=graph_restricts_to_root_id (Normal
+    //       orientation, root_id Some: no scoping needed, direct root walk)
+    //   c2: (T,T)=scoped-invert vs (T,F)=graph_edge_direction_inverted_is_dependency_to_dependant
+    //       (Inverted, root_id None: the ordinary unrestricted Inverted path)
+    //   -> graph_root_id_inverted_scope_is_normal_closure_leaf_first covers (T,T)
+    // `assemble_ticket_subtree`'s equivalent scope-then-invert *guard* is
+    // single-condition (`root_id` is always fixed there, so only
+    // `orientation` varies): covered by subtree_restricts_to_root_id_normal
+    // (Normal) and subtree_root_id_inverted_scope_is_normal_closure_leaf_first
+    // (Inverted). Its Inverted branch body then runs the two-condition
+    // fallback sweep enumerated as Decision H below.
+    //
+    // Decision H -- `assemble_ticket_subtree`'s Inverted fallback-sweep skip
+    // guard, an OR of three independent conditions (c3 excludes a ticket
+    // merely upstream of a cycle: it reaches a sink SCC via its deps without
+    // belonging to one, so it must be rendered beneath the cycle's branch
+    // rather than seeded as a standalone root):
+    //   skip(t) = !matches_selection(t, selection)
+    //             || represented.contains(t.id())
+    //             || !is_in_sink_scc(t, scope_lookup)
+    //   c1 = !matches_selection(t, selection)    [t fails the status filter]
+    //   c2 = represented.contains(t.id())        [t is already covered by an
+    //                                             earlier root's branch]
+    //   c3 = !is_in_sink_scc(t, scope_lookup)    [t is not part of a sink SCC:
+    //                                             it has a resolvable dep that
+    //                                             can never reach it back]
+    // The false decision emits `t` as an additional fallback root;
+    // `build_root_node` does NOT re-check `matches_selection`, so the c1 arm
+    // is the only thing keeping a selection-failing scope member out of the
+    // forest. Independence pairs (outcome = t is skipped, i.e. NOT emitted),
+    // each held against the (F,F,F)=emit baseline realized by "a" in every
+    // cited test:
+    //   c1: (T,F,F)=skip vs (F,F,F)=emit
+    //       -> subtree_root_id_inverted_fallback_skips_selection_failing_scope_member
+    //          (closed duplicate "a", swept first while "a" is not yet
+    //          represented and is itself in the sink SCC, is skipped by
+    //          !matches_selection; the open "a" later at (F,F,F) is the copy
+    //          actually emitted)
+    //   c2: (F,T,F)=skip vs (F,F,F)=emit
+    //       -> subtree_root_id_inverted_fallback_does_not_duplicate_already_represented_members
+    //          ("m", a leaf with an empty (vacuously sink) forward-reachable
+    //          set, is already represented -> skipped at (F,T,F); "a" is
+    //          emitted at (F,F,F)) and subtree_root_id_inverted_scoped_cycle_is_not_silently_empty
+    //          ("b" already represented -> skipped at (F,T,F) once "a" seeds
+    //          the cycle)
+    //   c3: (F,F,T)=skip vs (F,F,F)=emit
+    //       -> subtree_root_id_inverted_epic_upstream_of_cycle_is_not_a_standalone_root
+    //          ("r", upstream of cycle a<->b with no in-scope dependant of
+    //          its own, is not yet represented and passes selection, but is
+    //          excluded at (F,F,T) since it cannot reach itself back; "a" is
+    //          emitted at (F,F,F))
+    // Masking-MC/DC pass complete: all four rows above (F,F,F emit; T,F,F,
+    // F,T,F, F,F,T skip) each map to two passing examples that hold the
+    // remaining conditions per masking MC/DC. On any c2 row the OR
+    // short-circuits at c2=T before c3 is evaluated, so c3 is masked there
+    // and its would-be value is irrelevant to isolating c2: "r" in the
+    // does-not-duplicate test (whose c3 would be T, being upstream of the
+    // a<->b cycle) isolates c2 against (F,F,F) exactly as "m"/"b" (whose c3
+    // would be F) do. "m" and "b" are cited for c2 as the clearest witnesses,
+    // their masked c3 leaving the (F,T,F) row free of any incidental c3=T.
+    //
+    // Decision I -- `is_in_sink_scc`'s back-reachability check (the negated
+    // `is_in_sink_scc` is Decision H's c3). It is an `.all()`-fold over one
+    // condition per forward-reachable id; the `let Some(other) = .. else`
+    // guard's `return true` covers an invariant `reachable_via_deps` never
+    // violates (every id in `forward` resolved via `scope_lookup`), so it is
+    // not an independent condition but dead-defensive true:
+    //   sink(t) = reachable_via_deps(t).all(|id|
+    //                 reachable_via_deps(scope_lookup[id]).contains(t.id()))
+    //   c = reachable_via_deps(other, ..).contains(t.id())  [a forward-reachable
+    //                                                        member reaches t back]
+    // The fold is true iff every forward-reachable member reaches `t` back (t
+    // sits in a sink SCC), and vacuously true when `t` has no resolvable
+    // forward reach at all. Fold rows (outcome = t-is-in-a-sink-SCC), the
+    // non-vacuous pair realized where Decision H actually evaluates c3
+    // (c1=F, c2=F):
+    //   c true for every member (fold T) => sink
+    //       -> subtree_root_id_inverted_scoped_cycle_is_not_silently_empty
+    //          ("a" in the a<->b cycle: both forward members reach it back, so
+    //          is_in_sink_scc is true and "a" is seeded as a fallback root)
+    //   c false for some member (fold F) => not-sink
+    //       -> subtree_root_id_inverted_epic_upstream_of_cycle_is_not_a_standalone_root
+    //          ("r" reaches "a"/"b" but neither reaches "r" back, so
+    //          is_in_sink_scc is false and "r" is excluded from the sweep)
+    // The vacuous empty-forward arm (all() over [] = true) never reaches the
+    // sweep -- such a leaf is already an eligible Inverted root, represented
+    // before c3 is evaluated -- so it is exercised directly by
+    // is_in_sink_scc_leaf_with_empty_forward_set_is_vacuously_true.
 
     #[test]
     fn dependency_is_never_a_root() {
@@ -1076,18 +1326,179 @@ mod tests {
     }
 
     #[test]
-    fn subtree_restricts_to_root_id_inverted() {
-        // Inverted: rooting at `m` walks its dependants only (`e`), ignoring
-        // both `m`'s own dependency `l` and the rest of the forest.
+    fn subtree_root_id_inverted_scope_is_normal_closure_leaf_first() {
+        // `--root e` fixes the SCOPE to `e`'s normal-orientation closure
+        // ({l, m, e}); `--inverted` only changes how that fixed scope is
+        // presented -- leaf `l` becomes the root and nesting descends toward
+        // `e` at the bottom, rather than walking `e`'s (nonexistent)
+        // dependants.
         let tickets = vec![
             ticket("l", StatusValue::Open, 2, &[]),
             ticket("m", StatusValue::Open, 2, &["l"]),
             ticket("e", StatusValue::Open, 2, &["m"]),
         ];
         let subtree =
-            assemble_ticket_subtree(&tickets, TicketSelection::All, Orientation::Inverted, "m");
-        assert_eq!(root_ids(&subtree), vec!["m"]);
-        assert_eq!(child_ids(&subtree[0]), vec!["e"]);
+            assemble_ticket_subtree(&tickets, TicketSelection::All, Orientation::Inverted, "e");
+        assert_eq!(root_ids(&subtree), vec!["l"]);
+        let m_node = &subtree[0].children[0];
+        assert_eq!(m_node.id, "m");
+        assert_eq!(child_ids(m_node), vec!["e"]);
+    }
+
+    #[test]
+    fn subtree_root_id_inverted_on_a_leaf_yields_just_the_leaf() {
+        // The scope is the leaf's own (empty) dependency closure, so its
+        // dependant `e` is out of scope and must not appear.
+        let tickets = vec![
+            ticket("l", StatusValue::Open, 2, &[]),
+            ticket("e", StatusValue::Open, 2, &["l"]),
+        ];
+        let subtree =
+            assemble_ticket_subtree(&tickets, TicketSelection::All, Orientation::Inverted, "l");
+        assert_eq!(root_ids(&subtree), vec!["l"]);
+        assert!(subtree[0].children.is_empty());
+    }
+
+    #[test]
+    fn subtree_root_id_inverted_duplicate_root_ids_scope_includes_each_branch() {
+        // Both tickets sharing id "a" separately depend on "x" and "y"; the
+        // scope for --root a includes both duplicates plus each of their own
+        // deps (mirroring subtree_duplicate_root_ids_each_keep_their_own_dependencies),
+        // and the inverted rendering nests each duplicate "a" under its own leaf.
+        let tickets = vec![
+            ticket("a", StatusValue::Open, 2, &["x"]),
+            ticket("a", StatusValue::Open, 2, &["y"]),
+            ticket("x", StatusValue::Open, 2, &[]),
+            ticket("y", StatusValue::Open, 2, &[]),
+        ];
+        let subtree =
+            assemble_ticket_subtree(&tickets, TicketSelection::All, Orientation::Inverted, "a");
+        assert_eq!(root_ids(&subtree), vec!["x", "y"]);
+        assert_eq!(child_ids(&subtree[0]), vec!["a"]);
+        assert_eq!(child_ids(&subtree[1]), vec!["a"]);
+    }
+
+    #[test]
+    fn subtree_root_id_inverted_scoped_cycle_is_not_silently_empty() {
+        // Regression: scope {a, b} is a pure cycle (a<->b), so the
+        // unrestricted inverted forest over it has no eligible root and
+        // would otherwise return empty, silently hiding the whole requested
+        // scope. The fallback sweep gives "a" its own root branch and the
+        // per-root visited guard prunes the back-edge to "a", so both
+        // members are represented exactly once.
+        let tickets = vec![
+            ticket("a", StatusValue::Open, 2, &["b"]),
+            ticket("b", StatusValue::Open, 2, &["a"]),
+        ];
+        let subtree =
+            assemble_ticket_subtree(&tickets, TicketSelection::All, Orientation::Inverted, "a");
+        assert_eq!(root_ids(&subtree), vec!["a"]);
+        assert_eq!(child_ids(&subtree[0]), vec!["b"]);
+        assert!(
+            subtree[0].children[0].children.is_empty(),
+            "back-edge to a must be pruned"
+        );
+    }
+
+    #[test]
+    fn subtree_root_id_inverted_fallback_does_not_duplicate_already_represented_members() {
+        // Scope for --root r is {r, m, a, b}: an acyclic branch (leaf "m")
+        // alongside a rootless cycle (a<->b) reached only through r->a. The
+        // leaf-rooted forest already covers "r" (nested under leaf "m"); the
+        // fallback sweep must add exactly one extra root ("a") for the
+        // otherwise-unrepresented cycle, without re-adding "m"/"r" as a
+        // second root or spawning a redundant root for "b" (already covered
+        // by "a"'s own branch).
+        let tickets = vec![
+            ticket("r", StatusValue::Open, 2, &["m", "a"]),
+            ticket("m", StatusValue::Open, 2, &[]),
+            ticket("a", StatusValue::Open, 2, &["b"]),
+            ticket("b", StatusValue::Open, 2, &["a"]),
+        ];
+        let subtree =
+            assemble_ticket_subtree(&tickets, TicketSelection::All, Orientation::Inverted, "r");
+        assert_eq!(root_ids(&subtree), vec!["m", "a"]);
+        assert_eq!(child_ids(&subtree[0]), vec!["r"]);
+        assert_eq!(child_ids(&subtree[1]), vec!["r", "b"]);
+    }
+
+    #[test]
+    fn subtree_root_id_inverted_fallback_skips_selection_failing_scope_member() {
+        // Decision H, c1 independence pair (T,F) vs (F,F). Scope {a, b} is a
+        // pure cycle (a<->b) with a closed duplicate of "a" placed first in
+        // slice order: the closed copy enters the scope by id-membership
+        // (scoped_tickets keys on id), and since the cycle has no eligible
+        // inverted root the forest starts empty. The sweep therefore reaches
+        // the closed "a" while its id is not yet represented -- (c1=T fails
+        // Open selection, c2=F not represented) -- and must skip it via the
+        // `!matches_selection` arm. `build_root_node` never re-checks
+        // selection, so without that arm the closed copy would be emitted as
+        // the root; the priorities differ so the emitted root's summary pins
+        // which copy won: the open "a" (P2), reached later at (F,F).
+        let tickets = vec![
+            ticket("a", StatusValue::Closed, 5, &["b"]),
+            ticket("a", StatusValue::Open, 2, &["b"]),
+            ticket("b", StatusValue::Open, 2, &["a"]),
+        ];
+        let subtree =
+            assemble_ticket_subtree(&tickets, TicketSelection::Open, Orientation::Inverted, "a");
+        assert_eq!(root_ids(&subtree), vec!["a"]);
+        assert_eq!(
+            subtree[0].summary, "[P2] a: Title a",
+            "the open copy (P2), not the skipped closed copy (P5), is the root"
+        );
+        assert_eq!(child_ids(&subtree[0]), vec!["b"]);
+        assert!(
+            subtree[0].children[0].children.is_empty(),
+            "back-edge to a must be pruned"
+        );
+    }
+
+    #[test]
+    fn subtree_root_id_inverted_epic_upstream_of_cycle_is_not_a_standalone_root() {
+        // Decision H, c3 independence pair (F,F,T) vs (F,F,F). Regression:
+        // "r" (the requested root) depends on "a", which cycles with "b"
+        // (a<->b), and "r" is placed first in slice order. The initial
+        // inverted forest is empty (the cycle has no eligible root). A
+        // "not yet represented" check alone would wrongly seed "r" as its
+        // own standalone root here (r has no in-scope dependants of its own,
+        // so it looks like a leaf), before "a" is even reached -- and "a"'s
+        // own walk would then reach "r" again as a dependant, so "r" would
+        // appear twice, once wrongly at the top level and not leaf-first.
+        // `is_in_sink_scc` excludes "r": it has a resolvable dependency "a"
+        // that can never reach it back, so only "a" is seeded, and "r" is
+        // nested at the very bottom, appearing exactly once.
+        let tickets = vec![
+            ticket("r", StatusValue::Open, 2, &["a"]),
+            ticket("a", StatusValue::Open, 2, &["b"]),
+            ticket("b", StatusValue::Open, 2, &["a"]),
+        ];
+        let subtree =
+            assemble_ticket_subtree(&tickets, TicketSelection::All, Orientation::Inverted, "r");
+        assert_eq!(root_ids(&subtree), vec!["a"]);
+        assert_eq!(child_ids(&subtree[0]), vec!["r", "b"]);
+        assert!(
+            subtree[0].children[0].children.is_empty(),
+            "r has no in-scope dependants of its own"
+        );
+        assert!(
+            subtree[0].children[1].children.is_empty(),
+            "back-edge to a must be pruned"
+        );
+    }
+
+    #[test]
+    fn is_in_sink_scc_leaf_with_empty_forward_set_is_vacuously_true() {
+        // Decision I, vacuous all()-fold arm: a ticket with no resolvable
+        // in-scope dependency has an empty forward-reachable set, so the
+        // back-reachability fold is vacuously true and the ticket counts as a
+        // (singleton-leaf) sink. The full sweep never reaches this branch --
+        // such a leaf is already an eligible Inverted root, folded into
+        // `represented` before c3 is evaluated -- so it is exercised directly
+        // here, mirroring inverted_leaf_with_no_deps_is_a_root for Decision D.
+        let scope = [ticket("l", StatusValue::Open, 2, &[])];
+        let scope_lookup: HashMap<&str, &Ticket> = scope.iter().map(|t| (t.id(), t)).collect();
+        assert!(is_in_sink_scc(&scope[0], &scope_lookup));
     }
 
     #[test]
@@ -1226,6 +1637,141 @@ mod tests {
         );
         assert_eq!(graph_node_ids(&graph), vec!["a", "x", "y"]);
         assert_eq!(graph_edge_pairs(&graph), vec![("a", "x"), ("a", "y")]);
+    }
+
+    #[test]
+    fn graph_root_id_inverted_scope_is_normal_closure_leaf_first() {
+        // `--root e` fixes the SCOPE to `e`'s normal-orientation closure
+        // ({l, m, e}); `--inverted` re-runs the unrestricted Inverted
+        // assembly over that scope alone, so leaf `l` is the root and edges
+        // read dependency --> dependant up to `e`.
+        let tickets = vec![
+            ticket("l", StatusValue::Open, 2, &[]),
+            ticket("m", StatusValue::Open, 2, &["l"]),
+            ticket("e", StatusValue::Open, 2, &["m"]),
+        ];
+        let graph = assemble_ticket_graph(
+            &tickets,
+            TicketSelection::All,
+            Orientation::Inverted,
+            Some("e"),
+        );
+        assert_eq!(graph_node_ids(&graph), vec!["l", "m", "e"]);
+        assert_eq!(graph_edge_pairs(&graph), vec![("l", "m"), ("m", "e")]);
+    }
+
+    #[test]
+    fn graph_root_id_inverted_diamond_within_scope_keeps_both_edges() {
+        // `a` depends on both `b` and `c`, which both depend on `d`. Rooting
+        // at `a` --inverted scopes to {a, b, c, d} and re-runs the
+        // unrestricted inverted graph over it, which keeps both diamond
+        // edges into `a` (mirrors graph_diamond_preserves_both_edges_into_shared_dependency,
+        // now for the scoped-inverted path).
+        let tickets = vec![
+            ticket("a", StatusValue::Open, 2, &["b", "c"]),
+            ticket("b", StatusValue::Open, 2, &["d"]),
+            ticket("c", StatusValue::Open, 2, &["d"]),
+            ticket("d", StatusValue::Open, 2, &[]),
+        ];
+        let graph = assemble_ticket_graph(
+            &tickets,
+            TicketSelection::All,
+            Orientation::Inverted,
+            Some("a"),
+        );
+        assert_eq!(graph_node_ids(&graph), vec!["d", "b", "a", "c"]);
+        assert_eq!(
+            graph_edge_pairs(&graph),
+            vec![("d", "b"), ("b", "a"), ("d", "c"), ("c", "a")]
+        );
+    }
+
+    #[test]
+    fn graph_root_id_inverted_excludes_out_of_scope_dependant() {
+        // `z` depends on `m` but is not part of `m`'s own dependency closure;
+        // scoping by --root m keeps `z` out even though --inverted would,
+        // unscoped, walk dependants.
+        let tickets = vec![
+            ticket("l", StatusValue::Open, 2, &[]),
+            ticket("m", StatusValue::Open, 2, &["l"]),
+            ticket("z", StatusValue::Open, 2, &["m"]),
+        ];
+        let graph = assemble_ticket_graph(
+            &tickets,
+            TicketSelection::All,
+            Orientation::Inverted,
+            Some("m"),
+        );
+        assert_eq!(graph_node_ids(&graph), vec!["l", "m"]);
+        assert_eq!(graph_edge_pairs(&graph), vec![("l", "m")]);
+    }
+
+    #[test]
+    fn graph_root_id_inverted_on_a_leaf_yields_just_the_leaf_node() {
+        // Mirror of the tree path: the scope is the leaf's own (empty)
+        // dependency closure, so its dependant `e` is excluded.
+        let tickets = vec![
+            ticket("l", StatusValue::Open, 2, &[]),
+            ticket("e", StatusValue::Open, 2, &["l"]),
+        ];
+        let graph = assemble_ticket_graph(
+            &tickets,
+            TicketSelection::All,
+            Orientation::Inverted,
+            Some("l"),
+        );
+        assert_eq!(graph_node_ids(&graph), vec!["l"]);
+        assert!(graph.edges.is_empty());
+    }
+
+    #[test]
+    fn graph_root_id_inverted_scoped_cycle_is_not_silently_empty() {
+        // Graph equivalent of the tree regression: root_id: Some + Inverted
+        // recurses into assemble_ticket_graph with root_id: None over the
+        // scope, so the existing fallback-sweep coverage there (see
+        // graph_pure_cycle_with_no_root_is_still_represented_inverted)
+        // already handles a scope whose bottom is a pure cycle -- this locks
+        // that the recursive entry point actually reaches it.
+        let tickets = vec![
+            ticket("a", StatusValue::Open, 2, &["b"]),
+            ticket("b", StatusValue::Open, 2, &["a"]),
+        ];
+        let graph = assemble_ticket_graph(
+            &tickets,
+            TicketSelection::All,
+            Orientation::Inverted,
+            Some("a"),
+        );
+        assert_eq!(graph_node_ids(&graph), vec!["a", "b"]);
+        assert_eq!(graph_edge_pairs(&graph), vec![("a", "b"), ("b", "a")]);
+    }
+
+    #[test]
+    fn graph_root_id_inverted_upstream_of_cycle_deduplicates_the_upstream_node() {
+        // Graph equivalent of subtree_root_id_inverted_epic_upstream_of_cycle_is_not_a_standalone_root:
+        // "r" depends into cycle a<->b. Unlike the tree path, graph's
+        // fallback sweep (in the recursive root_id: None call) has no
+        // is_in_sink_scc restriction and could seed "r" as a node before "a"
+        // is processed -- but nodes are deduped by a single global
+        // visited_nodes set regardless of walk order, so "r" still appears
+        // exactly once, and every edge (including a --> r) is still
+        // recorded when "a"'s own walk reaches it.
+        let tickets = vec![
+            ticket("r", StatusValue::Open, 2, &["a"]),
+            ticket("a", StatusValue::Open, 2, &["b"]),
+            ticket("b", StatusValue::Open, 2, &["a"]),
+        ];
+        let graph = assemble_ticket_graph(
+            &tickets,
+            TicketSelection::All,
+            Orientation::Inverted,
+            Some("r"),
+        );
+        assert_eq!(graph_node_ids(&graph), vec!["r", "a", "b"]);
+        assert_eq!(
+            graph_edge_pairs(&graph),
+            vec![("a", "r"), ("a", "b"), ("b", "a")]
+        );
     }
 
     #[test]
