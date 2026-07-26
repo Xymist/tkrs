@@ -134,25 +134,16 @@ Claude Opus picks it up naturally from there. Other models may need additional g
 
 The repo ships `tk-cli` (CLI reference) and `tk-to-github-issue` (the
 workflow guide for `tk publish github` — readability pass, field specs,
-leak rules) for both Claude Code and Codex. Claude Code skills live directly
-under `skills/claude/`; Codex-native equivalents, including Codex UI metadata and
+leak rules) for both Claude Code and Codex. Claude Code skills live under
+`skills/claude/`; Codex-native equivalents, including Codex UI metadata and
 workflow idioms, live under `skills/codex/`.
 
-Symlink the appropriate pair into your personal skills directory so it stays
-in lockstep with the checkout.
-
-Claude Code:
-
-```sh
-ln -s "$(pwd)/skills/claude/tk-cli" ~/.claude/skills/tk-cli
-ln -s "$(pwd)/skills/claude/tk-to-github-issue" ~/.claude/skills/tk-to-github-issue
-```
-
-Codex:
+Run the installer to symlink each pair into any existing personal skills
+directory. It leaves correct links in place and refuses to overwrite conflicts,
+so the installed skills stay in lockstep with the checkout.
 
 ```sh
-ln -s "$(pwd)/skills/codex/tk-cli" ~/.codex/skills/tk-cli
-ln -s "$(pwd)/skills/codex/tk-to-github-issue" ~/.codex/skills/tk-to-github-issue
+./skills/install.sh
 ```
 
 ## Release workflow

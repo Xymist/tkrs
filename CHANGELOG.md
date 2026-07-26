@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `skills/install.sh` installs the bundled Claude Code and Codex skills into
+  personal skills directories that already exist.
+
 ## [0.12.0] - 2026-07-21
 
 ### Fixed
