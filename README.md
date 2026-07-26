@@ -132,15 +132,27 @@ Claude Opus picks it up naturally from there. Other models may need additional g
 
 ## Agent skills
 
-The repo ships Claude Code skills for agents under `skills/`:
-`tk-cli` (CLI reference) and `tk-to-github-issue` (the workflow guide
-for `tk publish github` — readability pass, field specs, leak rules).
-To install one, symlink it into your personal skills directory so it
-stays in lockstep with the checkout:
+The repo ships `tk-cli` (CLI reference) and `tk-to-github-issue` (the
+workflow guide for `tk publish github` — readability pass, field specs,
+leak rules) for both Claude Code and Codex. Claude Code skills live directly
+under `skills/claude/`; Codex-native equivalents, including Codex UI metadata and
+workflow idioms, live under `skills/codex/`.
+
+Symlink the appropriate pair into your personal skills directory so it stays
+in lockstep with the checkout.
+
+Claude Code:
 
 ```sh
-ln -s "$(pwd)/skills/tk-cli" ~/.claude/skills/tk-cli
-ln -s "$(pwd)/skills/tk-to-github-issue" ~/.claude/skills/tk-to-github-issue
+ln -s "$(pwd)/skills/claude/tk-cli" ~/.claude/skills/tk-cli
+ln -s "$(pwd)/skills/claude/tk-to-github-issue" ~/.claude/skills/tk-to-github-issue
+```
+
+Codex:
+
+```sh
+ln -s "$(pwd)/skills/codex/tk-cli" ~/.codex/skills/tk-cli
+ln -s "$(pwd)/skills/codex/tk-to-github-issue" ~/.codex/skills/tk-to-github-issue
 ```
 
 ## Release workflow

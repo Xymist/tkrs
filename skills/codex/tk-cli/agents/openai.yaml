@@ -1,0 +1,4 @@
+interface:
+  display_name: "tk CLI"
+  short_description: "Manage durable local tickets with tk"
+  default_prompt: "Use $tk-cli to create and manage durable local tickets for this work."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "tk to GitHub Issue"
+  short_description: "Publish tk tickets as polished GitHub issues"
+  default_prompt: "Use $tk-to-github-issue to publish a local tk ticket as a polished GitHub issue."
