@@ -7,6 +7,38 @@
 - `skills/install.sh` installs the bundled Claude Code and Codex skills into
   personal skills directories that already exist.
 
+### Changed
+
+- Ticket store resolution no longer climbs past a repo's root to pick up an
+  unrelated ancestor `.tickets/`, and no longer creates `./.tickets` in the
+  current directory when run from inside a repo that has none (behavior
+  outside any repo is unchanged).
+- The walk up from the current directory now recognizes a `.git` (accepting
+  both the plain directory and the file form used by worktrees and
+  submodules) or `.jj` directory as the repo root. If no local `.tickets/`
+  is found by the time that root is reached, `tk` uses
+  `~/.tickets/<repo-folder-name>` as the repo's dedicated store, keyed by
+  the repo root's spinal-cased folder name, so a `~/.tickets/` synced
+  across machines resolves to the same store no matter where each machine
+  checks the repo out. Two repos that share a folder name collide on one
+  store by default; commit a one-line `.tk-store` file at the repo root,
+  read from the main checkout, to override the store name and pick them
+  apart.
+- A linked git worktree or a `jj workspace add` workspace now shares its
+  main repo's store: the main repo's local `.tickets/`, if it has one,
+  otherwise the main repo's home-fallback key (including any `.tk-store`
+  override, read only from the main checkout so every worktree and
+  workspace agrees).
+- `~/.tickets` is the shared container the home-fallback stores above live
+  under, never a store in its own right, so it's no longer picked up by
+  the walk-up step; a plain `~/.tickets` can no longer double as a
+  personal walk-up store the way an ordinary repo-local `.tickets/` can.
+  `$HOME` is now read directly rather than falling back to the passwd
+  database, so an unset, empty, or relative `$HOME` is treated the same
+  as no home directory: `tk` falls back to a fresh `.tickets/` at the
+  main repo root instead, so a linked worktree still converges on the
+  same store as its main checkout.
+
 ## [0.12.0] - 2026-07-21
 
 ### Fixed

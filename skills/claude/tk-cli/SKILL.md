@@ -12,7 +12,11 @@ description: >
 # `tk` CLI Reference
 
 `tk` is a local-only ticket store. Tickets are Markdown files under
-`.tickets/` (usually gitignored). IDs look like `auc-1f89`. Partial
+`.tickets/` (usually gitignored). A repo with no local `.tickets/` gets
+one automatically at `~/.tickets/<repo-folder-name>`, shared by any of
+its git worktrees or jj workspaces, so a fresh clone works without any
+setup. A committed `.tk-store` at the repo root (read from the main
+checkout) overrides the store name. IDs look like `auc-1f89`. Partial
 ID matching works for `show`, `start`, `close`, `edit`, etc.
 
 ## Subcommand Map

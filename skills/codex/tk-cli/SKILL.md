@@ -6,7 +6,11 @@ description: Manage durable local work with the `tk` ticket CLI, whose Markdown 
 # Manage tickets with `tk`
 
 Use `tk` for durable work tracking. Tickets normally live in a gitignored
-`.tickets/` directory and may be picked up by another agent or session.
+`.tickets/` directory and may be picked up by another agent or session. A
+repo with no local `.tickets/` gets one automatically at
+`~/.tickets/<repo-folder-name>`, shared by any of its git worktrees or
+jj workspaces. A committed `.tk-store` at the repo root (read from the
+main checkout) overrides the store name.
 
 Follow the repository's `AGENTS.md` when it specifies whether to use `tk`, how
 to structure tickets, or which lifecycle commands to run.

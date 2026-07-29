@@ -2,7 +2,7 @@
 
 The git-backed issue tracker for AI agents. `tk` is inspired by Joe Armstrong's [Minimal Viable Program](https://joearms.github.io/published/2014-06-25-minimal-viable-program.html) with additional quality of life features for managing and querying against complex issue dependency graphs.
 
-Tickets are markdown files with YAML frontmatter in `.tickets/`. `tk` will search upward from the current directory to find the nearest `.tickets/` (or respect `TICKETS_DIR` when set), so commands work from any subdirectory. This allows AI agents to easily search them for relevant content without dumping ten thousand character JSONL lines into their context window.
+Tickets are markdown files with YAML frontmatter, stored in `.tickets/` and resolved automatically no matter which subdirectory you run `tk` from — see [Where tickets live](#where-tickets-live) for the resolution rules. This allows AI agents to easily search them for relevant content without dumping ten thousand character JSONL lines into their context window.
 
 Using ticket IDs as file names also allows IDEs to quickly navigate to the ticket for you. For example, you might run `git log` in your terminal and see something like:
 
@@ -32,6 +32,18 @@ Run `tk update`; if there is a new version it will download and unpack it over i
 ## Requirements
 
 `tk` is a Rust binary with no system dependencies.
+
+## Where tickets live
+
+`tk` resolves the ticket store in this order:
+
+1. `TICKETS_DIR`, if set (absolute, or resolved against the current directory).
+2. The nearest `.tickets/` directory found walking up from the current directory to the enclosing repo's root — except `~/.tickets` itself, which is never picked up this way, since it's the shared container every home-fallback store below lives under, not a store in its own right.
+3. The main repo's local `.tickets/`, when the current checkout is a linked git worktree or a `jj workspace add` workspace of a repo that already has one.
+4. `~/.tickets/<key>`, so a repo with no local store gets one automatically without an agent having to `mkdir .tickets` by hand. `<key>` is the spinal-cased content of a `.tk-store` file committed at the main repo root (read only from the main checkout, so every worktree and workspace of a repo agrees), or else the main repo root's folder name, spinal-cased. Keying by folder name rather than full path means a `~/.tickets` synced across machines resolves to the same store regardless of where each machine happens to check the repo out; two repos that share a folder name collide on one store by default, and a committed `.tk-store` is the escape hatch for that collision.
+5. A fresh `.tickets/` at the main repo root, when no usable `$HOME` is available (unset, empty, or a relative path) — landing at the main root rather than the current checkout so a linked worktree still converges on the same store as its main checkout.
+
+Outside of any repo, `tk` falls back to `.tickets` in the current directory.
 
 ## Agent Setup
 

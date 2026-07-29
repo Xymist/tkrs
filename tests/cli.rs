@@ -9,6 +9,10 @@ use std::time::{Duration, SystemTime};
 fn tk_cmd(dir: &TempDir) -> Command {
     let mut cmd = cargo_bin_cmd!("tk");
     cmd.current_dir(dir.path());
+    // Keep store resolution inside the fixture: a real HOME or TICKETS_DIR
+    // would send writes to the developer's own store.
+    cmd.env("HOME", dir.path().join("__home"));
+    cmd.env_remove("TICKETS_DIR");
     cmd
 }
 
@@ -214,6 +218,186 @@ fn create_respects_tickets_dir_env_override() {
 
     let ticket_path = override_dir.join(format!("{id}.md"));
     assert!(ticket_path.exists(), "ticket written to env override dir");
+}
+
+#[test]
+fn create_in_a_repo_without_a_local_store_writes_under_home() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("home");
+    let repo = temp.path().join("myrepo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(repo.join(".git")).unwrap();
+
+    let output = cargo_bin_cmd!("tk")
+        .current_dir(&repo)
+        .env("HOME", &home)
+        .env_remove("TICKETS_DIR")
+        .arg("create")
+        .arg("Home fallback")
+        .output()
+        .expect("create runs");
+    assert!(output.status.success());
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    let store = home.join(".tickets").join("myrepo");
+    assert!(
+        store.join(format!("{id}.md")).is_file(),
+        "ticket should land in {} but home store holds {:?}",
+        store.display(),
+        fs::read_dir(home.join(".tickets"))
+            .map(|d| d.flatten().map(|e| e.path()).collect::<Vec<_>>())
+    );
+    assert!(
+        !repo.join(".tickets").exists(),
+        "no store should be created inside the repo"
+    );
+}
+
+#[test]
+fn create_in_a_repo_with_a_tk_store_marker_writes_to_the_named_store() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("home");
+    let repo = temp.path().join("myrepo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    fs::write(repo.join(".tk-store"), "Renamed Store\n").unwrap();
+
+    let output = cargo_bin_cmd!("tk")
+        .current_dir(&repo)
+        .env("HOME", &home)
+        .env_remove("TICKETS_DIR")
+        .arg("create")
+        .arg("Marked store")
+        .output()
+        .expect("create runs");
+    assert!(output.status.success());
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    let store = home.join(".tickets").join("renamed-store");
+    assert!(
+        store.join(format!("{id}.md")).is_file(),
+        "ticket should land in {} but home store holds {:?}",
+        store.display(),
+        fs::read_dir(home.join(".tickets"))
+            .map(|d| d.flatten().map(|e| e.path()).collect::<Vec<_>>())
+    );
+    assert!(!home.join(".tickets").join("myrepo").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn create_fails_when_the_store_marker_is_unreadable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("home");
+    let repo = temp.path().join("myrepo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    let marker = repo.join(".tk-store");
+    fs::write(&marker, "blocked\n").unwrap();
+    fs::set_permissions(&marker, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read_to_string(&marker).is_ok() {
+        return;
+    }
+
+    let output = cargo_bin_cmd!("tk")
+        .current_dir(&repo)
+        .env("HOME", &home)
+        .env_remove("TICKETS_DIR")
+        .arg("create")
+        .arg("Blocked")
+        .output()
+        .expect("create runs");
+
+    assert!(!output.status.success(), "create must not silently succeed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(".tk-store"),
+        "error should name the marker: {stderr}"
+    );
+    assert!(!home.join(".tickets").exists());
+}
+
+#[test]
+fn create_from_a_worktree_writes_to_the_main_repos_local_store() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("home");
+    let main = temp.path().join("main");
+    let worktree = temp.path().join("wt");
+    let gitdir = main.join(".git/worktrees/wt");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&gitdir).unwrap();
+    fs::create_dir_all(main.join(".tickets")).unwrap();
+    fs::create_dir_all(&worktree).unwrap();
+    fs::write(gitdir.join("commondir"), "../..\n").unwrap();
+    fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", gitdir.display()),
+    )
+    .unwrap();
+
+    let output = cargo_bin_cmd!("tk")
+        .current_dir(&worktree)
+        .env("HOME", &home)
+        .env_remove("TICKETS_DIR")
+        .arg("create")
+        .arg("From worktree")
+        .output()
+        .expect("create runs");
+    assert!(output.status.success());
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    assert!(
+        main.join(".tickets").join(format!("{id}.md")).is_file(),
+        "ticket should join the main repo's store"
+    );
+    assert!(!worktree.join(".tickets").exists());
+    assert!(!home.join(".tickets").exists());
+}
+
+#[test]
+fn create_without_a_home_falls_back_to_the_repo_root() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path().join("myrepo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+
+    let output = cargo_bin_cmd!("tk")
+        .current_dir(&repo)
+        .env_remove("HOME")
+        .env_remove("TICKETS_DIR")
+        .arg("create")
+        .arg("No home")
+        .output()
+        .expect("create runs");
+    assert!(output.status.success());
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    assert!(repo.join(".tickets").join(format!("{id}.md")).is_file());
+}
+
+#[test]
+fn create_with_a_relative_home_falls_back_to_the_repo_root() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path().join("myrepo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+
+    let output = cargo_bin_cmd!("tk")
+        .current_dir(&repo)
+        .env("HOME", "relative/home")
+        .env_remove("TICKETS_DIR")
+        .arg("create")
+        .arg("Relative home")
+        .output()
+        .expect("create runs");
+    assert!(output.status.success());
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    assert!(repo.join(".tickets").join(format!("{id}.md")).is_file());
+    assert!(
+        !repo.join("relative").exists(),
+        "a relative HOME must not anchor a store under the cwd"
+    );
 }
 
 #[test]

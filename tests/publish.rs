@@ -39,6 +39,10 @@ fn tk_cmd(temp: &TempDir) -> Command {
 fn tk_cmd_in(dir: &Path) -> Command {
     let mut cmd = cargo_bin_cmd!("tk");
     cmd.current_dir(dir);
+    // Keep store resolution inside the fixture: a real HOME or TICKETS_DIR
+    // would send writes to the developer's own store.
+    cmd.env("HOME", dir.join("__home"));
+    cmd.env_remove("TICKETS_DIR");
     cmd
 }
 
